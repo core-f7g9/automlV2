@@ -1,0 +1,17 @@
+# Python / Jupyter
+__pycache__/
+.ipynb_checkpoints/
+*.pyc
+*.pyo
+*.log
+.env
+.venv/
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+
+# SageMaker output
+*.tmp
+output/
