@@ -25,4 +25,4 @@ Each notebook walks through one stage of the pipeline — from single-tenant set
 Delete SageMaker endpoints, models, and schedules after testing to avoid ongoing costs.
 
 ## License
-Apache 2.0
+The Unlicense
