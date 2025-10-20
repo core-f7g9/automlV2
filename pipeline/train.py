@@ -6,7 +6,7 @@ from sagemaker.workflow.steps import ProcessingStep, CacheConfig
 from sagemaker.workflow.lambda_step import LambdaStep, LambdaOutput
 from sagemaker.lambda_helper import Lambda
 from sagemaker.workflow.functions import JsonGet
-from sagemaker.workflow.model_step import RegisterModel
+from sagemaker.workflow.step_collections import RegisterModel
 from sagemaker.model import Model
 from sagemaker.workflow.pipeline_context import PipelineSession
 
@@ -42,11 +42,11 @@ split_step = ProcessingStep(
     outputs=[ProcessingOutput(output_name="out", source="/opt/ml/processing/output")],
     code="sql_to_s3_and_split.py",
     job_arguments=[
-        "--input_s3_csv", input_s3_csv,
-        "--target_col", target_col,
-        "--val_frac", str(val_frac),
-        "--random_seed", str(random_seed),
-        "--output_dir", "/opt/ml/processing/output",
+        "--input_s3_csv", input_s3_csv,          # already a ParameterString (OK)
+        "--target_col",  target_col,             # ParameterString (OK)
+        "--val_frac",    val_frac.to_string(),   # <- was str(val_frac)
+        "--random_seed", random_seed.to_string(),# <- was str(random_seed)
+        "--output_dir",  "/opt/ml/processing/output",
     ],
     cache_config=CacheConfig(enable_caching=True, expire_after="7d"),
 )
@@ -109,13 +109,13 @@ auto_step = LambdaStep(
     name="RunAutopilotV2",
     lambda_func=lam,
     inputs={
-        "job_name": auto_job_name,
-        "role_arn": role_arn,
-        "problem_type": problem_type,
-        "objective": objective,
-        "train_s3": train_s3_uri,
-        "target_col": target_col,
-        "output_s3": f"s3://{BUCKET}/{output_prefix}/autopilot-output/",
+        "job_name":  f"{project_name}-apv2-{int(time.time())}",  # OK: project_name is a literal here in your notebook setup
+        "role_arn":  role_arn,                 # ParameterString or plain string – OK
+        "problem_type": problem_type,          # ParameterString
+        "objective":   objective,              # ParameterString
+        "train_s3":    train_s3_uri,           # property from previous step – OK
+        "target_col":  target_col,             # ParameterString
+        "output_s3":   f"s3://{BUCKET}/{output_prefix}/autopilot-output/",  # OK (pure Python strings)
     },
     outputs=[LambdaOutput(output_name="payload", output_type="String")],
 )
