@@ -1,0 +1,5 @@
+print("BUCKET =", BUCKET)
+print("INPUT_S3CSV =", INPUT_S3CSV)
+print("TARGET_COL =", TARGET_COL)
+print("lambda_name =", lambda_name)
+print("auto_job_name =", auto_job_name)
