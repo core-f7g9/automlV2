@@ -150,8 +150,8 @@ auto_step = LambdaStep(
 )
 
 # ✔ Use step properties directly (no JsonGet)
-best_image = auto_step.properties.BestImageUri
-best_data  = auto_step.properties.BestModelArtifacts
+best_image = auto_step.properties.Outputs["BestImageUri"]
+best_data  = auto_step.properties.Outputs["BestModelArtifacts"]
 
 # ---- Step 3: Register model ----
 from sagemaker.model import Model
