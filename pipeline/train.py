@@ -56,7 +56,7 @@ from sagemaker.workflow.functions import Join
 train_s3_uri = Join(
     on="",
     values=[
-        proc_step.properties.ProcessingOutputConfig.Outputs["out"].S3Output.S3Uri,
+        split_step.properties.ProcessingOutputConfig.Outputs["out"].S3Output.S3Uri,
         "/train.csv",
     ],
 )
@@ -64,15 +64,16 @@ train_s3_uri = Join(
 validation_s3_uri = Join(
     on="",
     values=[
-        proc_step.properties.ProcessingOutputConfig.Outputs["out"].S3Output.S3Uri,
+        split_step.properties.ProcessingOutputConfig.Outputs["out"].S3Output.S3Uri,
         "/validation.csv",
     ],
 )
 
 # ---- Step 2: Lambda to run Autopilot V2 ----
 lambda_src = r"""
-import os, json, time, boto3
+import json, time, boto3
 sm = boto3.client("sagemaker")
+
 def handler(event, context):
     job_name = event["job_name"]
     req = {
@@ -96,6 +97,7 @@ def handler(event, context):
         }
     }
     sm.create_auto_ml_job_v2(**req)
+
     while True:
         d = sm.describe_auto_ml_job_v2(AutoMLJobName=job_name)
         st = d["AutoMLJobStatus"]
@@ -104,11 +106,17 @@ def handler(event, context):
         time.sleep(30)
     if st != "Completed":
         raise RuntimeError(f"Autopilot V2 job {job_name} ended with {st}")
+
     best = d["AutoMLJobBestCandidate"]
-    return {"statusCode": 200, "body": json.dumps({
-        "inference_image_uri": best["InferenceContainerDefinitions"][0]["Image"],
-        "model_artifacts_s3": best["CandidateProperties"]["CandidateArtifactLocations"]["ModelArtifacts"]
-    })}"""
+    best_image = best["InferenceContainerDefinitions"][0]["Image"]
+    best_artifacts = best["CandidateProperties"]["CandidateArtifactLocations"]["ModelArtifacts"]
+
+    # IMPORTANT: return top-level fields matching LambdaStep outputs
+    return {
+        "BestImageUri": best_image,
+        "BestModelArtifacts": best_artifacts
+    }
+"""
 
 lam = Lambda(
     function_name=f"{project_name}-autopilotv2",
@@ -121,26 +129,40 @@ lam = Lambda(
 
 auto_job_name = f"{project_name}-apv2-{int(time.time())}"
 
+from sagemaker.workflow.lambda_step import LambdaStep, LambdaOutput, LambdaOutputTypeEnum
+
 auto_step = LambdaStep(
     name="RunAutopilotV2",
     lambda_func=lam,
     inputs={
-        "job_name":  f"{project_name}-apv2-{int(time.time())}",  # OK: project_name is a literal here in your notebook setup
-        "role_arn":  role_arn,                 # ParameterString or plain string – OK
-        "problem_type": problem_type,          # ParameterString
-        "objective":   objective,              # ParameterString
-        "train_s3":    train_s3_uri,           # property from previous step – OK
-        "target_col":  target_col,             # ParameterString
-        "output_s3":   f"s3://{BUCKET}/{output_prefix}/autopilot-output/",  # OK (pure Python strings)
+        "job_name":  f"{project_name}-apv2-{int(time.time())}",
+        "role_arn":  role_arn,
+        "problem_type": problem_type,
+        "objective":   objective,
+        "train_s3":    train_s3_uri,
+        "target_col":  target_col,
+        "output_s3":   f"s3://{BUCKET}/{output_prefix}/autopilot-output/",
     },
-    outputs=[LambdaOutput(output_name="payload", output_type="String")],
+    outputs=[
+        LambdaOutput(output_name="BestImageUri", output_type=LambdaOutputTypeEnum.String),
+        LambdaOutput(output_name="BestModelArtifacts", output_type=LambdaOutputTypeEnum.String),
+    ],
 )
 
-best_image = JsonGet(step_name=auto_step.name, property_file=None, json_path="$.inference_image_uri")
-best_data  = JsonGet(step_name=auto_step.name, property_file=None, json_path="$.model_artifacts_s3")
+# ✔ Use step properties directly (no JsonGet)
+best_image = auto_step.properties.BestImageUri
+best_data  = auto_step.properties.BestModelArtifacts
 
 # ---- Step 3: Register model ----
-model_to_register = Model(image_uri=best_image, model_data=best_data, role=role_arn, sagemaker_session=p_sess)
+from sagemaker.model import Model
+from sagemaker.workflow.step_collections import RegisterModel
+
+model_to_register = Model(
+    image_uri=best_image,
+    model_data=best_data,
+    role=role_arn,
+    sagemaker_session=p_sess,
+)
 
 register_step = RegisterModel(
     name="RegisterBestModel",
