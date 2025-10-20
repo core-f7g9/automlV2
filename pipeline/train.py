@@ -112,6 +112,10 @@ def handler(event, context):
     }
 """
 
+# Write the Lambda code to a real file
+with open("autopilot_runner.py", "w") as f:
+    f.write(lambda_src)
+
 # keep names short to avoid OS/name length issues
 SAFE_NAME     = "c1-apv2"
 lambda_name   = f"{SAFE_NAME}-runner"
@@ -120,7 +124,7 @@ auto_job_name = f"{SAFE_NAME}-{int(time.time())}"
 lam = Lambda(
     function_name=lambda_name,
     execution_role_arn=role_arn,
-    script=lambda_src,
+    script="autopilot_runner.py",   # <-- filename, not the code string
     handler="index.handler",
     timeout=900,
     memory_size=512,
