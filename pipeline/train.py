@@ -51,7 +51,23 @@ split_step = ProcessingStep(
     cache_config=CacheConfig(enable_caching=True, expire_after="7d"),
 )
 
-train_s3_uri = split_step.properties.ProcessingOutputConfig.Outputs["out"].S3Output.S3Uri + "/train.csv"
+from sagemaker.workflow.functions import Join
+
+train_s3_uri = Join(
+    on="",
+    values=[
+        proc_step.properties.ProcessingOutputConfig.Outputs["out"].S3Output.S3Uri,
+        "/train.csv",
+    ],
+)
+
+validation_s3_uri = Join(
+    on="",
+    values=[
+        proc_step.properties.ProcessingOutputConfig.Outputs["out"].S3Output.S3Uri,
+        "/validation.csv",
+    ],
+)
 
 # ---- Step 2: Lambda to run Autopilot V2 ----
 lambda_src = r"""
