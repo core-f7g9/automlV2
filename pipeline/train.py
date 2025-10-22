@@ -124,7 +124,7 @@ def handler(event, context):
 """
 
 # Write the Lambda code to a real file
-with open("autopilot_runner.py", "w") as f:
+with open("index.py", "w") as f:
     f.write(lambda_src)
 
 # keep names short to avoid OS/name length issues
