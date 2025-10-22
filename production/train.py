@@ -91,7 +91,7 @@ automl_step = AutoMLStep(
 
 # Best candidate artifacts from the AutoML step properties (V1)
 best_image = automl_step.properties.BestCandidate.InferenceContainers[0].Image
-best_data  = automl_step.properties.BestCandidate.CandidateProperties.CandidateArtifactLocations.ModelArtifacts
+best_data  = automl_step.properties.BestCandidate.InferenceContainers[0].ModelDataUrl
 
 # --------- Step 3: Register best model to Model Registry ----------
 model_to_register = Model(
