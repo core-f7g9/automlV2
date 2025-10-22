@@ -76,7 +76,7 @@ def handler(event, context):
         "AutoMLJobInputDataConfig": [
             {
                 "ChannelType": "training",
-                "ContentType": "text/csv",
+                "ContentType": "text/csv;header=present",
                 "CompressionType": "None",
                 "DataSource": {
                     "S3DataSource": {
@@ -102,16 +102,25 @@ def handler(event, context):
 
     sm.create_auto_ml_job_v2(**req)
 
-    # wait for completion
+    # ---- Wait loop with richer diagnostics ----
     while True:
         d = sm.describe_auto_ml_job_v2(AutoMLJobName=job_name)
-        st = d["AutoMLJobStatus"]
+        st  = d["AutoMLJobStatus"]
+        sst = d.get("AutoMLJobSecondaryStatus", "")
         if st in ("Completed", "Failed", "Stopped"):
             break
         time.sleep(30)
 
     if st != "Completed":
-        raise RuntimeError(f"Autopilot V2 job {job_name} ended with {st}")
+        # Bubble up the reason so you can see the exact cause in Studio logs
+        reason = d.get("FailureReason") or f"status={st}, secondary={sst}"
+        print("Autopilot failed. FailureReason:", reason)
+        # Include the last few lines of ProblemTypeConfig failure if present
+        try:
+            print("ResolvedAttributes:", json.dumps(d.get("ResolvedAttributes", {}))[:2000])
+        except Exception:
+            pass
+        raise RuntimeError(f"Autopilot V2 job {job_name} failed: {reason}")
 
     best = d["AutoMLJobBestCandidate"]
     best_image = best["InferenceContainerDefinitions"][0]["Image"]
