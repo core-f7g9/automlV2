@@ -65,9 +65,8 @@ train_prefix_s3 = split_step.properties.ProcessingOutputConfig.Outputs["train"].
 # Use AutoMLInput; target stays on the estimator (not required here)
 auto_input = AutoMLInput(
     inputs=train_prefix_s3,          # S3 prefix of the 'train' folder
-    content_type="text/csv",
-    channel_type="training",
-    # compression defaults to None
+    target_attribute_name=target_col_param,
+    channel_type="training"
 )
 
 automl = AutoML(
