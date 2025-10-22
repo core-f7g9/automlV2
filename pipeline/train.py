@@ -1,5 +1,5 @@
 # ============================================
-# Cell 3: Build & run the SageMaker Pipeline (Autopilot V1 with step_args)
+# Cell 3: Build & run the SageMaker Pipeline (Autopilot V1, correct inputs)
 # ============================================
 import json, boto3, sagemaker
 from sagemaker.workflow.pipeline import Pipeline
@@ -12,9 +12,8 @@ from sagemaker.model import Model
 from sagemaker.workflow.step_collections import RegisterModel
 
 # Autopilot V1
-from sagemaker.automl.automl import AutoML
+from sagemaker.automl.automl import AutoML, AutoMLInput           # <-- correct input type
 from sagemaker.workflow.automl_step import AutoMLStep
-from sagemaker.inputs import TrainingInput
 
 p_sess = PipelineSession()
 
@@ -67,13 +66,15 @@ train_s3_uri = Join(
     ],
 )
 
-# Autopilot V1 expects a TrainingInput for the channel
-train_input = TrainingInput(
-    s3_data=train_s3_uri,
-    content_type="text/csv"  # header present is fine
+# --------- Step 2: Autopilot V1 (native AutoMLStep via step_args) ----------
+# Use AutoMLInput (NOT TrainingInput)
+auto_input = AutoMLInput(
+    inputs=train_s3_uri,
+    target_attribute_name=target_col_param,  # redundant but OK; also set on AutoML below
+    compression_type="None",
+    content_type="text/csv"                  # header-present CSV
 )
 
-# --------- Step 2: Autopilot V1 (native AutoMLStep via step_args) ----------
 automl = AutoML(
     role=role_param,
     target_attribute_name=target_col_param,
@@ -84,14 +85,15 @@ automl = AutoML(
     mode="ENSEMBLING",
 )
 
-step_args = automl.fit(inputs={"training": train_input})
+# IMPORTANT: pass either a single AutoMLInput or a list of them
+step_args = automl.fit(inputs=[auto_input])
 
 automl_step = AutoMLStep(
     name="RunAutopilotV1",
     step_args=step_args
 )
 
-# Best candidate artifacts from the AutoML step properties
+# Best candidate artifacts from the AutoML step properties (V1)
 best_image = automl_step.properties.BestCandidate.InferenceContainers[0].Image
 best_data  = automl_step.properties.BestCandidate.ModelArtifacts.S3ModelArtifacts
 
