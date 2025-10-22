@@ -1,7 +1,7 @@
 # ============================================
-# Cell 3: Build & run the SageMaker Pipeline (Autopilot V1)
+# Cell 3: Build & run the SageMaker Pipeline (Autopilot V1 with step_args)
 # ============================================
-import json, sagemaker
+import json, boto3, sagemaker
 from sagemaker.workflow.pipeline import Pipeline
 from sagemaker.workflow.parameters import ParameterString, ParameterFloat, ParameterInteger
 from sagemaker.processing import ScriptProcessor, ProcessingInput, ProcessingOutput
@@ -14,6 +14,7 @@ from sagemaker.workflow.step_collections import RegisterModel
 # Autopilot V1
 from sagemaker.automl.automl import AutoML
 from sagemaker.workflow.automl_step import AutoMLStep
+from sagemaker.inputs import TrainingInput
 
 p_sess = PipelineSession()
 
@@ -24,7 +25,7 @@ target_col_param   = ParameterString("TargetCol",    default_value=TARGET_COL)
 val_frac_param     = ParameterFloat( "ValFrac",      default_value=0.2)
 seed_param         = ParameterInteger("RandomSeed",  default_value=42)
 
-# Multiclass defaults you asked for
+# Multiclass defaults
 problem_type_param = ParameterString("ProblemType",  default_value="MulticlassClassification")
 objective_param    = ParameterString("Objective",    default_value="Accuracy")
 
@@ -66,7 +67,13 @@ train_s3_uri = Join(
     ],
 )
 
-# --------- Step 2: Autopilot V1 (native AutoMLStep) ----------
+# Autopilot V1 expects a TrainingInput for the channel
+train_input = TrainingInput(
+    s3_data=train_s3_uri,
+    content_type="text/csv"  # header present is fine
+)
+
+# --------- Step 2: Autopilot V1 (native AutoMLStep via step_args) ----------
 automl = AutoML(
     role=role_param,
     target_attribute_name=target_col_param,
@@ -74,17 +81,17 @@ automl = AutoML(
     problem_type=problem_type_param,                 # "MulticlassClassification"
     job_objective={"MetricName": objective_param},   # "Accuracy" (or "F1")
     max_candidates=10,
-    mode="ENSEMBLING",                               # good default; you can change later
+    mode="ENSEMBLING",
 )
+
+step_args = automl.fit(inputs={"training": train_input})
 
 automl_step = AutoMLStep(
     name="RunAutopilotV1",
-    automl=automl,
-    inputs={"training": train_s3_uri},               # <- direct pointer to train.csv
+    step_args=step_args
 )
 
-# Pull best candidate’s image + model data from the AutoML step properties
-# (These property paths mirror what `DescribeAutoMLJob` returns for V1.)
+# Best candidate artifacts from the AutoML step properties
 best_image = automl_step.properties.BestCandidate.InferenceContainers[0].Image
 best_data  = automl_step.properties.BestCandidate.ModelArtifacts.S3ModelArtifacts
 
