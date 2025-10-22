@@ -70,34 +70,46 @@ sm = boto3.client("sagemaker")
 
 def handler(event, context):
     job_name = event["job_name"]
+
     req = {
         "AutoMLJobName": job_name,
-        "AutoMLJobInputDataConfig": [{
-            "ChannelType": "training",
-            "CompressionType": "None",
-            "ContentType": "text/csv",
-            "S3Input": {"S3Uri": event["train_s3"]}
-        }],
+        "AutoMLJobInputDataConfig": [
+            {
+                "ChannelType": "training",
+                "ContentType": "text/csv",
+                "CompressionType": "None",
+                "DataSource": {
+                    "S3DataSource": {
+                        "S3DataType": "S3Prefix",
+                        "S3Uri": event["train_s3"]
+                    }
+                }
+            }
+        ],
         "OutputDataConfig": {"S3OutputPath": event["output_s3"]},
         "RoleArn": event["role_arn"],
-        "AutoMLProblemType": event["problem_type"],
-        "AutoMLJobObjective": {"MetricName": event["objective"]},
+        # Problem type implied here (tabular)
         "AutoMLProblemTypeConfig": {
             "TabularJobConfig": {
                 "TargetAttributeName": event["target_col"],
                 "CompletionCriteria": {"MaxCandidates": 10},
                 "Mode": "ENSEMBLING"
             }
-        }
+        },
+        # Objective OK at top level for V2
+        "AutoMLJobObjective": {"MetricName": event["objective"]}
     }
+
     sm.create_auto_ml_job_v2(**req)
-    # wait
+
+    # wait for completion
     while True:
         d = sm.describe_auto_ml_job_v2(AutoMLJobName=job_name)
         st = d["AutoMLJobStatus"]
-        if st in ("Completed","Failed","Stopped"):
+        if st in ("Completed", "Failed", "Stopped"):
             break
         time.sleep(30)
+
     if st != "Completed":
         raise RuntimeError(f"Autopilot V2 job {job_name} ended with {st}")
 
@@ -105,7 +117,6 @@ def handler(event, context):
     best_image = best["InferenceContainerDefinitions"][0]["Image"]
     best_art   = best["CandidateProperties"]["CandidateArtifactLocations"]["ModelArtifacts"]
 
-    # return top-level fields that match LambdaStep outputs
     return {
         "BestImageUri": best_image,
         "BestModelArtifacts": best_art
