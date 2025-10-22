@@ -1,5 +1,5 @@
 # ============================================
-# Cell 3: Build & run the SageMaker Pipeline (Autopilot V1, correct inputs)
+# Cell 3: Build & run the SageMaker Pipeline (Autopilot V1, robust to ParameterString)
 # ============================================
 import json, boto3, sagemaker
 from sagemaker.workflow.pipeline import Pipeline
@@ -12,29 +12,27 @@ from sagemaker.model import Model
 from sagemaker.workflow.step_collections import RegisterModel
 
 # Autopilot V1
-from sagemaker.automl.automl import AutoML, AutoMLInput           # <-- correct input type
+from sagemaker.automl.automl import AutoML, AutoMLInput
 from sagemaker.workflow.automl_step import AutoMLStep
 
 p_sess = PipelineSession()
 
-# --------- pipeline parameters (reusable per client) ----------
+# --------- pipeline parameters (keep only those that Autopilot tolerates) ----------
 bucket_param       = ParameterString("Bucket",       default_value=BUCKET)
 input_s3_csv_param = ParameterString("InputS3CSV",   default_value=INPUT_S3CSV)
 target_col_param   = ParameterString("TargetCol",    default_value=TARGET_COL)
 val_frac_param     = ParameterFloat( "ValFrac",      default_value=0.2)
 seed_param         = ParameterInteger("RandomSeed",  default_value=42)
 
-# Multiclass defaults
-problem_type_param = ParameterString("ProblemType",  default_value="MulticlassClassification")
-objective_param    = ParameterString("Objective",    default_value="Accuracy")
-
-role_param         = ParameterString("ExecutionRoleArn", default_value=role_arn)
+# We’ll set problem_type & objective as literals to avoid SDK string checks on ParameterString
+PROBLEM_TYPE = "MulticlassClassification"   # you asked for multiclass
+OBJECTIVE    = "Accuracy"                   # or "F1" if you prefer
 
 # --------- Step 1: Processing (split) ----------
 img = sagemaker.image_uris.retrieve("sklearn", boto3.Session().region_name, version="1.2-1")
 script_processor = ScriptProcessor(
     image_uri=img,
-    role=role_arn,
+    role=role_arn,                 # plain string (from Cell 1)
     instance_type="ml.m5.large",
     instance_count=1,
     command=["python3"],
@@ -67,25 +65,26 @@ train_s3_uri = Join(
 )
 
 # --------- Step 2: Autopilot V1 (native AutoMLStep via step_args) ----------
-# Use AutoMLInput (NOT TrainingInput)
+# Use AutoMLInput (NOT TrainingInput), and keep values simple
 auto_input = AutoMLInput(
-    inputs=train_s3_uri,
-    target_attribute_name=target_col_param,  # redundant but OK; also set on AutoML below
+    inputs=train_s3_uri,              # Pipeline property is OK here
+    content_type="text/csv",
     channel_type="training",
-    content_type="text/csv"                  # header-present CSV
+    # compression defaults to None
 )
 
+# Use plain strings for role and output_path to avoid the 'ParameterString is not iterable' pitfalls
 automl = AutoML(
-    role=role_param,
-    target_attribute_name=target_col_param,
-    output_path=Join(on="", values=["s3://", bucket_param, "/mlops/autopilot-output/"]),
-    problem_type=problem_type_param,                 # "MulticlassClassification"
-    job_objective={"MetricName": objective_param},   # "Accuracy" (or "F1")
+    role=role_arn,                                            # plain string
+    target_attribute_name=target_col_param,                   # ParameterString works here
+    output_path=f"s3://{BUCKET}/mlops/autopilot-output/",     # plain string
+    problem_type=PROBLEM_TYPE,                                # plain string
+    job_objective={"MetricName": OBJECTIVE},                  # plain string
     max_candidates=10,
     mode="ENSEMBLING",
 )
 
-# IMPORTANT: pass either a single AutoMLInput or a list of them
+# IMPORTANT: pass AutoMLInput or list[AutoMLInput]
 step_args = automl.fit(inputs=[auto_input])
 
 automl_step = AutoMLStep(
@@ -101,7 +100,7 @@ best_data  = automl_step.properties.BestCandidate.ModelArtifacts.S3ModelArtifact
 model_to_register = Model(
     image_uri=best_image,
     model_data=best_data,
-    role=role_arn,
+    role=role_arn,                    # plain string
     sagemaker_session=p_sess,
 )
 
@@ -122,7 +121,7 @@ pipeline = Pipeline(
     name=f"{PROJECT_NAME}-pipeline",
     parameters=[
         bucket_param, input_s3_csv_param, target_col_param,
-        val_frac_param, seed_param, problem_type_param, objective_param, role_param
+        val_frac_param, seed_param
     ],
     steps=[split_step, automl_step, register_step],
     sagemaker_session=p_sess,
