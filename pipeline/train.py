@@ -71,7 +71,7 @@ train_s3_uri = Join(
 auto_input = AutoMLInput(
     inputs=train_s3_uri,
     target_attribute_name=target_col_param,  # redundant but OK; also set on AutoML below
-    compression_type="None",
+    channel_type="training",
     content_type="text/csv"                  # header-present CSV
 )
 
