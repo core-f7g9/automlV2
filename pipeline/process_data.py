@@ -58,9 +58,11 @@ def main():
 
     train, val = stratified_split(df, args.target_col, args.val_frac, args.random_seed)
 
-    os.makedirs(args.output_dir, exist_ok=True)
-    train.to_csv(os.path.join(args.output_dir, "train.csv"), index=False)
-    val.to_csv(os.path.join(args.output_dir, "validation.csv"), index=False)
+    os.makedirs(os.path.join(args.output_dir, "train"), exist_ok=True)
+    os.makedirs(os.path.join(args.output_dir, "validation"), exist_ok=True)
+
+    train.to_csv(os.path.join(args.output_dir, "train", "train.csv"), index=False)
+    val.to_csv(os.path.join(args.output_dir, "validation", "validation.csv"), index=False)
 
 if __name__ == "__main__":
     main()
