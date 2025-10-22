@@ -21,8 +21,8 @@ input_s3_csv_param = ParameterString("InputS3CSV",   default_value=INPUT_S3CSV)
 target_col_param   = ParameterString("TargetCol",    default_value=TARGET_COL)
 val_frac_param     = ParameterFloat( "ValFrac",      default_value=0.2)
 seed_param         = ParameterInteger("RandomSeed",  default_value=42)
-problem_type_param = ParameterString("ProblemType",  default_value="BinaryClassification")
-objective_param    = ParameterString("Objective",    default_value="F1")
+problem_type_param = ParameterString("ProblemType",  default_value="MulticlassClassification")
+objective_param    = ParameterString("Objective",    default_value="Accuracy")
 role_param         = ParameterString("ExecutionRoleArn", default_value=role_arn)
 
 # --------- Step 1: Processing (split) ----------
@@ -92,6 +92,7 @@ def handler(event, context):
         "AutoMLProblemTypeConfig": {
             "TabularJobConfig": {
                 "TargetAttributeName": event["target_col"],
+                "ProblemType": event["problem_type"],
                 "CompletionCriteria": {"MaxCandidates": 10},
                 "Mode": "ENSEMBLING"
             }
