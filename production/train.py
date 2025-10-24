@@ -73,7 +73,7 @@ train_prefix_s3 = split_step.properties.ProcessingOutputConfig.Outputs["train"].
 auto_input = AutoMLInput(
     inputs=train_prefix_s3,            # S3 prefix (folder), not a Join
     channel_type="training",
-    content_type="text/csv",
+    content_type="text/csv;header=present",
     # optional but allowed to include:
     target_attribute_name=target_col_param
 )
@@ -197,7 +197,7 @@ deploy_lam = Lambda(
     handler="deploy_from_registry.handler",
     timeout=300,
     memory_size=256,
-    environment={"variables": {"EXEC_ROLE_ARN": role_arn}},
+    environment={"Variables": {"EXEC_ROLE_ARN": role_arn}},
 )
 
 # Use the ModelPackageArn emitted by RegisterModel
