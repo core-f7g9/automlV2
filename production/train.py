@@ -14,6 +14,14 @@ from sagemaker.workflow.step_collections import RegisterModel
 from sagemaker.automl.automl import AutoML, AutoMLInput
 from sagemaker.workflow.automl_step import AutoMLStep
 
+# Deployment
+from sagemaker.workflow.parameters import ParameterBoolean, ParameterString, ParameterInteger
+
+DeployAfterRegister   = ParameterBoolean(name="DeployAfterRegister", default_value=False)
+EndpointNameParam     = ParameterString(name="EndpointName", default_value=f"{PROJECT_NAME}-endpoint")
+InstanceTypeParam     = ParameterString(name="InstanceType", default_value="ml.m5.large")
+InitialInstanceCount  = ParameterInteger(name="InitialInstanceCount", default_value=1)
+
 p_sess = PipelineSession()
 region = boto3.Session().region_name
 
@@ -113,11 +121,117 @@ register_step = RegisterModel(
     description="Best model from Autopilot V1",
 )
 
+# --------- Deployment ----------
+from sagemaker.workflow.lambda_step import LambdaStep, LambdaOutput, LambdaOutputTypeEnum
+from sagemaker.lambda_helper import Lambda
+from sagemaker.workflow.conditions import ConditionEquals
+from sagemaker.workflow.condition_step import ConditionStep
+import time
+
+# --- Minimal, dedicated-only deploy lambda: create model + endpoint config, then create OR update endpoint
+deploy_lambda_src = r"""
+import boto3, os, time
+sm = boto3.client("sagemaker")
+
+def handler(event, context):
+    pkg_arn    = event["ModelPackageArn"]
+    endpoint   = event["EndpointName"]
+    inst_type  = event["InstanceType"]
+    init_count = int(event["InitialInstanceCount"])
+    exec_role  = os.environ["EXEC_ROLE_ARN"]
+
+    stamp = str(int(time.time()))
+    model_name = f"{endpoint}-model-{stamp}"
+    cfg_name   = f"{endpoint}-cfg-{stamp}"
+
+    # 1) Always create a fresh Model from the approved package
+    try:
+        sm.create_model(
+            ModelName=model_name,
+            PrimaryContainer={"ModelPackageName": pkg_arn},
+            ExecutionRoleArn=exec_role
+        )
+    except sm.exceptions.ClientError as e:
+        if "AlreadyExists" not in str(e):
+            raise
+
+    # 2) Always create a fresh EndpointConfig (dedicated instances)
+    try:
+        sm.create_endpoint_config(
+            EndpointConfigName=cfg_name,
+            ProductionVariants=[{
+                "VariantName": "AllTraffic",
+                "ModelName": model_name,
+                "InstanceType": inst_type,
+                "InitialInstanceCount": init_count
+            }]
+        )
+    except sm.exceptions.ClientError as e:
+        if "AlreadyExists" not in str(e):
+            raise
+
+    # 3) Create or Update the endpoint (keeps endpoint name stable)
+    try:
+        sm.describe_endpoint(EndpointName=endpoint)
+        sm.update_endpoint(EndpointName=endpoint, EndpointConfigName=cfg_name)
+        action = "updated"
+    except sm.exceptions.ClientError as e:
+        if "Could not find endpoint" in str(e) or "NotFound" in str(e):
+            sm.create_endpoint(EndpointName=endpoint, EndpointConfigName=cfg_name)
+            action = "created"
+        else:
+            raise
+
+    return {"status": "OK", "action": action, "endpoint": endpoint, "config": cfg_name, "model": model_name}
+"""
+
+# write the lambda file and create the function
+with open("deploy_from_registry.py", "w") as f:
+    f.write(deploy_lambda_src)
+
+deploy_lambda_name = f"{PROJECT_NAME}-deploy-{int(time.time())}"
+deploy_lam = Lambda(
+    function_name=deploy_lambda_name,
+    execution_role_arn=role_arn,   # must allow sagemaker:Create*/Update*/Describe* and iam:PassRole
+    script="deploy_from_registry.py",
+    handler="deploy_from_registry.handler",
+    timeout=300,
+    memory_size=256,
+    environment={"variables": {"EXEC_ROLE_ARN": role_arn}},
+)
+
+# Use the ModelPackageArn emitted by RegisterModel
+model_package_arn_prop = register_step.properties.ModelPackageArn
+
+deploy_step = LambdaStep(
+    name="DeployEndpointDedicated",
+    lambda_func=deploy_lam,
+    inputs={
+        "ModelPackageArn": model_package_arn_prop,
+        "EndpointName":    EndpointNameParam,
+        "InstanceType":    InstanceTypeParam,
+        "InitialInstanceCount": InitialInstanceCount,
+    },
+    outputs=[LambdaOutput(output_name="status", output_type=LambdaOutputTypeEnum.String)]
+)
+
+# Only deploy when you explicitly ask (boolean param)
+should_deploy = ConditionEquals(left=DeployAfterRegister, right=True)
+deploy_condition_step = ConditionStep(
+    name="MaybeDeployDedicated",
+    conditions=[should_deploy],
+    if_steps=[deploy_step],
+    else_steps=[],
+)
+
 # --------- Build & start the pipeline ----------
 pipeline = Pipeline(
     name=f"{PROJECT_NAME}-pipeline",
-    parameters=[bucket_param, input_s3_csv_param, target_col_param, val_frac_param, seed_param],
-    steps=[split_step, automl_step, register_step],
+    parameters=[
+        bucket_param, input_s3_csv_param, target_col_param, val_frac_param, seed_param,
+        DeployAfterRegister, EndpointNameParam, InstanceTypeParam, InitialInstanceCount
+    ],
+    steps=[split_step, automl_step, register_step, deploy_condition_step],
     sagemaker_session=p_sess,
 )
 
