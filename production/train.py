@@ -50,47 +50,64 @@ script_processor = ScriptProcessor(
 split_step = ProcessingStep(
     name="SplitTrainValidation",
     processor=script_processor,
-    inputs=[ProcessingInput(source=input_s3_csv_param, destination="/opt/ml/processing/input")],
+    inputs=[
+        # Mount the exact S3 object under /opt/ml/processing/input/
+        ProcessingInput(
+            source=input_s3_csv_param,
+            destination="/opt/ml/processing/input"
+        )
+    ],
     outputs=[
         ProcessingOutput(output_name="train",      source="/opt/ml/processing/output/train"),
         ProcessingOutput(output_name="validation", source="/opt/ml/processing/output/validation"),
     ],
-    code="sql_to_s3_and_split.py",
+    code="sql_to_s3_and_split.py",  # reads mounted file
     job_arguments=[
-        "--input_s3_csv", input_s3_csv_param,
+        # NOTE: no --input_s3_csv; script reads mounted file
         "--target_col",   target_col_param,
         "--val_frac",     val_frac_param.to_string(),
         "--random_seed",  seed_param.to_string(),
+        "--mounted_input_dir", "/opt/ml/processing/input",
         "--output_dir",   "/opt/ml/processing/output",
     ],
     cache_config=CacheConfig(enable_caching=True, expire_after="7d"),
 )
 
-# Use the S3 prefix of the *train* folder (serializable Pipeline property)
+# Use the S3 prefixes of the outputs
 train_prefix_s3 = split_step.properties.ProcessingOutputConfig.Outputs["train"].S3Output.S3Uri
+val_prefix_s3   = split_step.properties.ProcessingOutputConfig.Outputs["validation"].S3Output.S3Uri
 
-# --------- Step 2: Autopilot V1 (native AutoMLStep via step_args) ----------
-auto_input = AutoMLInput(
-    inputs=train_prefix_s3,            # S3 prefix (folder), not a Join
-    channel_type="training",
-    content_type="text/csv;header=present",
-    # optional but allowed to include:
-    target_attribute_name=target_col_param
-)
+# --------- Step 2: Autopilot V1 (now with validation channel) ----------
+auto_inputs = [
+    AutoMLInput(
+        inputs=train_prefix_s3,
+        channel_type="training",
+        content_type="text/csv;header=present",
+        target_attribute_name=target_col_param
+    ),
+    AutoMLInput(
+        inputs=val_prefix_s3,
+        channel_type="validation",
+        content_type="text/csv;header=present",
+        target_attribute_name=target_col_param
+    ),
+]
 
 automl = AutoML(
-    role=role_arn,                                            # plain string
-    sagemaker_session=p_sess,                                  # << bind to PipelineSession
-    target_attribute_name=target_col_param,                    # ParameterString ok here
-    output_path=f"s3://{BUCKET}/mlops/autopilot-output/",      # plain string
+    role=role_arn,
+    sagemaker_session=p_sess,
+    target_attribute_name=target_col_param,
+    output_path=f"s3://{BUCKET}/{OUTPUT_PREFIX}/autopilot-output/",
     problem_type=PROBLEM_TYPE,
     job_objective={"MetricName": OBJECTIVE},
-    max_candidates=10,
-    mode="ENSEMBLING",                                        # AutoMLStep supports ENSEMBLING mode
+    max_candidates=1,
+    mode="ENSEMBLING",
+    max_runtime_per_training_job_in_seconds=600,
+    total_job_runtime_in_seconds=1800
 )
 
 # Autopilot V1: fit() returns step_args for AutoMLStep
-step_args = automl.fit(inputs=[auto_input])
+step_args = automl.fit(inputs=auto_inputs)
 
 automl_step = AutoMLStep(
     name="RunAutopilotV1",
@@ -121,14 +138,13 @@ register_step = RegisterModel(
     description="Best model from Autopilot V1",
 )
 
-# --------- Deployment ----------
+# --------- Deployment (unchanged) ----------
 from sagemaker.workflow.lambda_step import LambdaStep, LambdaOutput, LambdaOutputTypeEnum
 from sagemaker.lambda_helper import Lambda
 from sagemaker.workflow.conditions import ConditionEquals
 from sagemaker.workflow.condition_step import ConditionStep
 import time
 
-# --- Minimal, dedicated-only deploy lambda: create model + endpoint config, then create OR update endpoint
 deploy_lambda_src = r"""
 import boto3, os, time
 sm = boto3.client("sagemaker")
@@ -144,7 +160,6 @@ def handler(event, context):
     model_name = f"{endpoint}-model-{stamp}"
     cfg_name   = f"{endpoint}-cfg-{stamp}"
 
-    # 1) Always create a fresh Model from the approved package
     try:
         sm.create_model(
             ModelName=model_name,
@@ -155,7 +170,6 @@ def handler(event, context):
         if "AlreadyExists" not in str(e):
             raise
 
-    # 2) Always create a fresh EndpointConfig (dedicated instances)
     try:
         sm.create_endpoint_config(
             EndpointConfigName=cfg_name,
@@ -170,7 +184,6 @@ def handler(event, context):
         if "AlreadyExists" not in str(e):
             raise
 
-    # 3) Create or Update the endpoint (keeps endpoint name stable)
     try:
         sm.describe_endpoint(EndpointName=endpoint)
         sm.update_endpoint(EndpointName=endpoint, EndpointConfigName=cfg_name)
@@ -185,14 +198,13 @@ def handler(event, context):
     return {"status": "OK", "action": action, "endpoint": endpoint, "config": cfg_name, "model": model_name}
 """
 
-# write the lambda file and create the function
 with open("deploy_from_registry.py", "w") as f:
     f.write(deploy_lambda_src)
 
 deploy_lambda_name = f"{PROJECT_NAME}-deploy-{int(time.time())}"
 deploy_lam = Lambda(
     function_name=deploy_lambda_name,
-    execution_role_arn=role_arn,   # must allow sagemaker:Create*/Update*/Describe* and iam:PassRole
+    execution_role_arn=role_arn,   # keep as-is if your role already works for Lambda+SageMaker
     script="deploy_from_registry.py",
     handler="deploy_from_registry.handler",
     timeout=300,
@@ -200,7 +212,6 @@ deploy_lam = Lambda(
     environment={"Variables": {"EXEC_ROLE_ARN": role_arn}},
 )
 
-# Use the ModelPackageArn emitted by RegisterModel
 model_package_arn_prop = register_step.properties.ModelPackageArn
 
 deploy_step = LambdaStep(
@@ -215,7 +226,6 @@ deploy_step = LambdaStep(
     outputs=[LambdaOutput(output_name="status", output_type=LambdaOutputTypeEnum.String)]
 )
 
-# Only deploy when you explicitly ask (boolean param)
 should_deploy = ConditionEquals(left=DeployAfterRegister, right=True)
 deploy_condition_step = ConditionStep(
     name="MaybeDeployDedicated",
