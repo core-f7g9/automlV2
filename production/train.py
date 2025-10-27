@@ -3,7 +3,7 @@
 # ============================================
 import json, boto3, sagemaker
 from sagemaker.workflow.pipeline import Pipeline
-from sagemaker.workflow.parameters import ParameterString, ParameterFloat, ParameterInteger
+from sagemaker.workflow.parameters import ParameterString, ParameterFloat, ParameterInteger, ParameterBoolean
 from sagemaker.processing import ScriptProcessor, ProcessingInput, ProcessingOutput
 from sagemaker.workflow.steps import ProcessingStep, CacheConfig
 from sagemaker.workflow.pipeline_context import PipelineSession
@@ -15,12 +15,16 @@ from sagemaker.automl.automl import AutoML, AutoMLInput
 from sagemaker.workflow.automl_step import AutoMLStep
 
 # Deployment
-from sagemaker.workflow.parameters import ParameterBoolean, ParameterString, ParameterInteger
+from sagemaker.workflow.parameters import ParameterString, ParameterInteger, ParameterBoolean
 
 DeployAfterRegister   = ParameterBoolean(name="DeployAfterRegister", default_value=False)
 EndpointNameParam     = ParameterString(name="EndpointName", default_value=f"{PROJECT_NAME}-endpoint")
 InstanceTypeParam     = ParameterString(name="InstanceType", default_value="ml.m5.large")
 InitialInstanceCount  = ParameterInteger(name="InitialInstanceCount", default_value=1)
+
+# ---- Data capture params (new) ----
+DataCaptureS3Param    = ParameterString(name="DataCaptureS3Uri", default_value=f"s3://{BUCKET}/{OUTPUT_PREFIX}/data-capture/")
+CapturePercentParam   = ParameterInteger(name="CapturePercent", default_value=100)  # 1–100
 
 p_sess = PipelineSession()
 region = boto3.Session().region_name
@@ -138,7 +142,7 @@ register_step = RegisterModel(
     description="Best model from Autopilot V1",
 )
 
-# --------- Deployment (unchanged) ----------
+# --------- Deployment with Data Capture ---------
 from sagemaker.workflow.lambda_step import LambdaStep, LambdaOutput, LambdaOutputTypeEnum
 from sagemaker.lambda_helper import Lambda
 from sagemaker.workflow.conditions import ConditionEquals
@@ -155,6 +159,8 @@ def handler(event, context):
     inst_type  = event["InstanceType"]
     init_count = int(event["InitialInstanceCount"])
     exec_role  = os.environ["EXEC_ROLE_ARN"]
+    data_cap_s3 = event["DataCaptureS3Uri"]
+    cap_pct     = int(event.get("CapturePercent", 100))
 
     stamp = str(int(time.time()))
     model_name = f"{endpoint}-model-{stamp}"
@@ -178,7 +184,17 @@ def handler(event, context):
                 "ModelName": model_name,
                 "InstanceType": inst_type,
                 "InitialInstanceCount": init_count
-            }]
+            }],
+            DataCaptureConfig={
+                "EnableCapture": True,
+                "InitialSamplingPercentage": cap_pct,
+                "DestinationS3Uri": data_cap_s3,
+                "CaptureOptions": [{"CaptureMode": "Input"}, {"CaptureMode": "Output"}],
+                "CaptureContentTypeHeader": {
+                    "CsvContentTypes": ["text/csv"],
+                    "JsonContentTypes": ["application/json"]
+                }
+            }
         )
     except sm.exceptions.ClientError as e:
         if "AlreadyExists" not in str(e):
@@ -222,6 +238,8 @@ deploy_step = LambdaStep(
         "EndpointName":    EndpointNameParam,
         "InstanceType":    InstanceTypeParam,
         "InitialInstanceCount": InitialInstanceCount,
+        "DataCaptureS3Uri": DataCaptureS3Param,     # new
+        "CapturePercent":  CapturePercentParam,     # new
     },
     outputs=[LambdaOutput(output_name="status", output_type=LambdaOutputTypeEnum.String)]
 )
@@ -239,7 +257,8 @@ pipeline = Pipeline(
     name=f"{PROJECT_NAME}-pipeline",
     parameters=[
         bucket_param, input_s3_csv_param, target_col_param, val_frac_param, seed_param,
-        DeployAfterRegister, EndpointNameParam, InstanceTypeParam, InitialInstanceCount
+        DeployAfterRegister, EndpointNameParam, InstanceTypeParam, InitialInstanceCount,
+        DataCaptureS3Param, CapturePercentParam,   # include new params
     ],
     steps=[split_step, automl_step, register_step, deploy_condition_step],
     sagemaker_session=p_sess,

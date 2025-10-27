@@ -13,6 +13,7 @@ role_arn = sagemaker.get_execution_role()
 BUCKET      = sm_sess.default_bucket()   # fine to keep; or set to your own bucket name string
 INPUT_S3CSV = f"s3://{BUCKET}/input/data.csv"   # <-- point to a real CSV with header
 TARGET_COL  = "your_target_col"                 # <-- set to the exact column name in the CSV
+DATA_CAPTURE_S3 = f"s3://{BUCKET}/{OUTPUT_PREFIX}/data-capture/"
 
 # Naming knobs (keep consistent with the rest of the notebook)
 PROJECT_NAME  = "client1-autopilot-v1"   # use v1 to match Autopilot V1 pipeline
