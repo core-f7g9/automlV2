@@ -94,11 +94,7 @@ def build_target_branch(target_name: str):
             target_attribute_name=target_name
         ),
     ]
-    auto_ml_job_config = {
-        "CandidateGenerationConfig": {
-            "FeatureSpecificationS3Uri": FEATURE_SPEC_S3  # << whitelist the 3 inputs
-        }
-    }
+
     automl = AutoML(
         role=role_arn,
         sagemaker_session=p_sess,
@@ -110,8 +106,11 @@ def build_target_branch(target_name: str):
         mode="ENSEMBLING",
         max_runtime_per_training_job_in_seconds=1800,
         total_job_runtime_in_seconds=6*3600,
-        auto_ml_job_config=auto_ml_job_config
+        candidate_generation_config={     # ✅ correct key for Autopilot V1
+            "FeatureSpecificationS3Uri": FEATURE_SPEC_S3
+        }
     )
+
     step_args = automl.fit(inputs=auto_inputs)
     automl_step = AutoMLStep(name=f"RunAutopilotV1_{target_name}", step_args=step_args)
 
