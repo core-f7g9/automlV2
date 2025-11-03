@@ -1,11 +1,10 @@
-# ============================================
-# Cell 2: Write the processing script to disk
-# ============================================
-# Reads CSV from the mounted ProcessingInput, does a stratified split, writes train/validation.
+# ============================================================
+# Cell 2: Write processing script — split once, write per-target
+# ============================================================
 import textwrap, os
 
 script = textwrap.dedent("""
-import argparse, os, glob
+import argparse, os, glob, json
 import pandas as pd
 import numpy as np
 
@@ -36,7 +35,9 @@ def find_input_csv(mounted_dir: str) -> str:
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--target_col", type=str, required=True)
+    p.add_argument("--stratify_target", type=str, required=True)
+    p.add_argument("--targets_csv", type=str, required=True, help="Comma-separated target columns to produce")
+    p.add_argument("--input_features_csv", type=str, required=True, help="Comma-separated feature columns to keep")
     p.add_argument("--val_frac", type=float, default=0.2)
     p.add_argument("--random_seed", type=int, default=42)
     p.add_argument("--mounted_input_dir", type=str, default="/opt/ml/processing/input")
@@ -46,40 +47,63 @@ def main():
     local_in = find_input_csv(args.mounted_input_dir)
     df = pd.read_csv(local_in, low_memory=False)
 
-    if args.target_col not in df.columns:
-        raise ValueError(f"target_col '{args.target_col}' not in columns: {df.columns.tolist()}")
+    targets = [c.strip() for c in args.targets_csv.split(",") if c.strip()]
+    input_feats = [c.strip() for c in args.input_features_csv.split(",") if c.strip()]
 
+    # Basic validations
+    for c in input_feats + targets:
+        if c not in df.columns:
+            raise ValueError(f"Column '{c}' not found in CSV header")
+    if args.stratify_target not in targets:
+        raise ValueError("--stratify_target must be one of the targets being produced")
+
+    # Drop rows missing the stratify target
     before = len(df)
-    df = df[~df[args.target_col].isna()].copy()
+    df = df[~df[args.stratify_target].isna()].copy()
     if len(df) < before:
-        print(f"Dropped {before - len(df)} rows with missing target.")
+        print(f"Dropped {before - len(df)} rows with missing stratify target '{args.stratify_target}'.")
 
-    n_classes = df[args.target_col].nunique(dropna=True)
-    if n_classes < 2:
-        raise ValueError(f"Need at least 2 classes in target '{args.target_col}', found {n_classes}.")
+    # Ensure ≥2 classes for the stratify target
+    if df[args.stratify_target].nunique(dropna=True) < 2:
+        raise ValueError(f"Need at least 2 classes in stratify target '{args.stratify_target}'.")
 
-    print("Class counts after target-drop:")
-    print(df[args.target_col].value_counts(dropna=False))
+    # Split once (on stratify target)
+    train_df, val_df = stratified_split(df, args.stratify_target, args.val_frac, args.random_seed)
 
-    train, val = stratified_split(df, args.target_col, args.val_frac, args.random_seed)
+    # For each target, write INPUT_FEATURES + that target, into separate folders
+    for tgt in targets:
+        # For training that target, drop rows with missing tgt (post-split)
+        tr = train_df[~train_df[tgt].isna()].copy()
+        va = val_df[~val_df[tgt].isna()].copy()
 
-    missing_in_train = set(df[args.target_col].unique()) - set(train[args.target_col].unique())
-    if missing_in_train:
-        raise ValueError(f"Some classes have no training examples after split: {missing_in_train}. "
-                         f"Consider lowering --val_frac or reviewing class counts.")
+        # Keep only inputs + this target
+        keep_cols = input_feats + [tgt]
+        tr = tr[keep_cols]
+        va = va[keep_cols]
 
-    os.makedirs(os.path.join(args.output_dir, "train"), exist_ok=True)
-    os.makedirs(os.path.join(args.output_dir, "validation"), exist_ok=True)
+        # Final sanity: both splits must have at least 2 classes for tgt
+        if tr[tgt].nunique(dropna=True) < 2:
+            raise ValueError(f"Target '{tgt}' has <2 classes in train after filtering.")
+        # Ensure every class in combined appears in train
+        combined = pd.concat([tr[[tgt]], va[[tgt]]], axis=0)
+        missing_in_train = set(combined[tgt].unique()) - set(tr[tgt].unique())
+        if missing_in_train:
+            raise ValueError(f"Target '{tgt}': some classes absent in train after split: {missing_in_train}")
 
-    train.to_csv(os.path.join(args.output_dir, "train", "train.csv"), index=False)
-    val.to_csv(os.path.join(args.output_dir, "validation", "validation.csv"), index=False)
-    print(f"Wrote train={len(train)} rows, validation={len(val)} rows.")
+        out_dir_tr = os.path.join(args.output_dir, tgt, "train")
+        out_dir_va = os.path.join(args.output_dir, tgt, "validation")
+        os.makedirs(out_dir_tr, exist_ok=True)
+        os.makedirs(out_dir_va, exist_ok=True)
+
+        tr.to_csv(os.path.join(out_dir_tr, "train.csv"), index=False)
+        va.to_csv(os.path.join(out_dir_va, "validation.csv"), index=False)
+        print(f"[{tgt}] wrote train={len(tr)} validation={len(va)} with columns={keep_cols}")
 
 if __name__ == "__main__":
     main()
 """).strip()
 
-with open("sql_to_s3_and_split.py", "w") as f:
+with open("prepare_per_target_splits.py", "w") as f:
     f.write(script)
 
-print("Wrote sql_to_s3_and_split.py")
+print("Wrote prepare_per_target_splits.py")
