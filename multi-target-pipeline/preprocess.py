@@ -4,7 +4,7 @@
 import textwrap, os
 
 script = textwrap.dedent("""
-import argparse, os, glob, json
+import argparse, os, glob
 import pandas as pd
 import numpy as np
 
@@ -72,19 +72,16 @@ def main():
 
     # For each target, write INPUT_FEATURES + that target, into separate folders
     for tgt in targets:
-        # For training that target, drop rows with missing tgt (post-split)
         tr = train_df[~train_df[tgt].isna()].copy()
         va = val_df[~val_df[tgt].isna()].copy()
 
-        # Keep only inputs + this target
         keep_cols = input_feats + [tgt]
         tr = tr[keep_cols]
         va = va[keep_cols]
 
-        # Final sanity: both splits must have at least 2 classes for tgt
+        # Sanity: both splits must have at least 2 classes for tgt
         if tr[tgt].nunique(dropna=True) < 2:
             raise ValueError(f"Target '{tgt}' has <2 classes in train after filtering.")
-        # Ensure every class in combined appears in train
         combined = pd.concat([tr[[tgt]], va[[tgt]]], axis=0)
         missing_in_train = set(combined[tgt].unique()) - set(tr[tgt].unique())
         if missing_in_train:

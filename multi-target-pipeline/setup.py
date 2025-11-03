@@ -1,7 +1,7 @@
 # =========================
 # Cell 1: Setup variables
 # =========================
-import os, json
+import os
 import boto3, sagemaker
 from urllib.parse import urlparse
 from botocore.exceptions import ClientError
@@ -20,7 +20,7 @@ BUCKET       = sm_sess.default_bucket()                 # or set your own
 INPUT_S3CSV  = f"s3://{BUCKET}/input/data.csv"         # must exist; header present
 DATA_PREFIX  = f"s3://{BUCKET}/{OUTPUT_PREFIX}"
 
-# ---- Targets (edit if using only 2 later)
+# ---- Targets (edit if fewer)
 TARGET_COLS      = ["DepartmentCode", "AccountCode", "SubAccountCode", "LocationCode"]
 # ---- Inputs (the only features that will be kept)
 INPUT_FEATURES   = ["VendorName", "LineDescription", "ClubNumber"]

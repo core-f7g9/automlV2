@@ -1,8 +1,8 @@
 # ==========================================================
-# Cell 3: Build & run 4-target Autopilot V1 pipeline
-#          Deploy all on ONE instance via MME
+# Cell 3: 4-target Autopilot V1 pipeline + MME deployment
 # ==========================================================
-import boto3, sagemaker, time, json
+import time, json
+import boto3, sagemaker
 from sagemaker.workflow.pipeline import Pipeline
 from sagemaker.workflow.parameters import (
     ParameterString, ParameterFloat, ParameterInteger, ParameterBoolean
@@ -40,7 +40,7 @@ InitialInstanceCount  = ParameterInteger(name="InitialInstanceCount", default_va
 DataCaptureS3Param    = ParameterString(name="DataCaptureS3Uri", default_value=f"s3://{BUCKET}/{OUTPUT_PREFIX}/data-capture/")
 CapturePercentParam   = ParameterInteger(name="CapturePercent", default_value=100)
 
-# literals (keeps Autopilot happy at compile time)
+# literals
 PROBLEM_TYPE = "MulticlassClassification"
 OBJECTIVE    = "Accuracy"
 
@@ -55,7 +55,6 @@ script_processor = ScriptProcessor(
     sagemaker_session=p_sess,
 )
 
-# Dynamically define outputs for each target (train & validation)
 processing_outputs = []
 for tgt in TARGET_COLS:
     processing_outputs.append(ProcessingOutput(output_name=f"train_{tgt}",      source=f"/opt/ml/processing/output/{tgt}/train"))
@@ -68,18 +67,18 @@ split_step = ProcessingStep(
     outputs=processing_outputs,
     code="prepare_per_target_splits.py",
     job_arguments=[
-        "--stratify_target", TARGET_COLS[0],  # stratify on first target
-        "--targets_csv", ",".join(TARGET_COLS),
-        "--input_features_csv", ",".join(INPUT_FEATURES),
-        "--val_frac", val_frac_param.to_string(),
-        "--random_seed", seed_param.to_string(),
+        "--stratify_target", TARGET_COLS[0],                   # literal OK
+        "--targets_csv", ",".join(TARGET_COLS),                # literal OK
+        "--input_features_csv", ",".join(INPUT_FEATURES),      # literal OK
+        "--val_frac",     val_frac_param.to_string(),          # <<< pipeline variable
+        "--random_seed",  seed_param.to_string(),              # <<< pipeline variable
         "--mounted_input_dir", "/opt/ml/processing/input",
-        "--output_dir", "/opt/ml/processing/output",
+        "--output_dir",   "/opt/ml/processing/output",
     ],
     cache_config=CacheConfig(enable_caching=True, expire_after="7d"),
 )
 
-# --------- Helper: per-target Autopilot + Register ----------
+# --------- Per-target Autopilot + Register ----------
 def build_target_branch(target_name: str):
     train_s3 = split_step.properties.ProcessingOutputConfig.Outputs[f"train_{target_name}"].S3Output.S3Uri
     val_s3   = split_step.properties.ProcessingOutputConfig.Outputs[f"validation_{target_name}"].S3Output.S3Uri
@@ -110,7 +109,6 @@ def build_target_branch(target_name: str):
         mode="ENSEMBLING",
         max_runtime_per_training_job_in_seconds=1800,
         total_job_runtime_in_seconds=6*3600
-        # NOTE: No SDK whitelist flags needed—CSV already has only inputs + target
     )
 
     step_args = automl.fit(inputs=auto_inputs)
@@ -149,7 +147,7 @@ for tgt in TARGET_COLS:
     best_images[tgt] = img_uri
     best_datas[tgt]  = data_uri
 
-# --------- Lambda for MME deploy (same as before, validates common image) ----------
+# --------- Lambda for MME deployment (validates same image; 1 instance) ----------
 deploy_lambda_src = r"""
 import boto3, os, time, json
 from urllib.parse import urlparse
@@ -182,7 +180,6 @@ def handler(event, context):
 
     image = list(images)[0]
 
-    from urllib.parse import urlparse
     up = urlparse(mme_prefix)
     dst_bucket, dst_key_prefix = up.netloc, up.path.lstrip("/")
     if not dst_key_prefix.endswith("/"):
@@ -254,7 +251,7 @@ with open("deploy_mme_from_autopilot.py", "w") as f:
 deploy_lambda_name = f"{PROJECT_NAME}-deploy-mme-{int(time.time())}"
 deploy_lam = Lambda(
     function_name=deploy_lambda_name,
-    execution_role_arn=role_arn,
+    execution_role_arn=role_arn,  # role must allow SageMaker, S3 (Get/Put/Copy), logs
     script="deploy_mme_from_autopilot.py",
     handler="deploy_mme_from_autopilot.handler",
     timeout=600,
@@ -262,28 +259,28 @@ deploy_lam = Lambda(
     environment={"Variables": {"EXEC_ROLE_ARN": role_arn}},
 )
 
-# Build Lambda input payload from step properties
+# Build Lambda input payload from step properties (use .to_string() for pipeline vars/props)
 targets_payload = []
 for tgt in TARGET_COLS:
     targets_payload.append({
-        "name": tgt,
-        "image": str(best_images[tgt]),
-        "model_data": str(best_datas[tgt]),
+        "name": tgt,                                   # literal OK
+        "image":       best_images[tgt].to_string(),   # <<< pipeline variable
+        "model_data":  best_datas[tgt].to_string(),    # <<< pipeline variable
     })
 
-MME_MODELS_PREFIX = f"s3://{BUCKET}/{OUTPUT_PREFIX}/mme/{CLIENT_NAME}/{str(int(time.time()))}/models/"
+MME_MODELS_PREFIX = f"s3://{BUCKET}/{OUTPUT_PREFIX}/mme/{CLIENT_NAME}/{int(time.time())}/models/"
 
 deploy_step = LambdaStep(
     name="DeployAllOnOneInstance_MME",
     lambda_func=deploy_lam,
     inputs={
-        "EndpointName":    EndpointNameParam,
-        "InstanceType":    InstanceTypeParam,
-        "InitialInstanceCount": InitialInstanceCount,
-        "DataCaptureS3Uri": DataCaptureS3Param,
-        "CapturePercent":  CapturePercentParam,
-        "ModelsPrefix":    MME_MODELS_PREFIX,
-        "Targets":         targets_payload,
+        "EndpointName":          EndpointNameParam.to_string(),
+        "InstanceType":          InstanceTypeParam.to_string(),
+        "InitialInstanceCount":  InitialInstanceCount.to_string(),
+        "DataCaptureS3Uri":      DataCaptureS3Param.to_string(),
+        "CapturePercent":        CapturePercentParam.to_string(),
+        "ModelsPrefix":          MME_MODELS_PREFIX,      # literal OK
+        "Targets":               targets_payload,        # contains .to_string() items
     },
     outputs=[LambdaOutput(output_name="status", output_type=LambdaOutputTypeEnum.String)]
 )
