@@ -1,5 +1,6 @@
 # ==========================================================
 # Cell 3: 4-target Autopilot V1 pipeline + MME deployment
+#         (FIX: use CSV strings in LambdaStep inputs)
 # ==========================================================
 import time, json
 import boto3, sagemaker
@@ -12,6 +13,7 @@ from sagemaker.workflow.steps import ProcessingStep, CacheConfig
 from sagemaker.workflow.pipeline_context import PipelineSession
 from sagemaker.model import Model
 from sagemaker.workflow.step_collections import RegisterModel
+from sagemaker.workflow.functions import Join  # <<< important
 
 # Autopilot V1
 from sagemaker.automl.automl import AutoML, AutoMLInput
@@ -70,8 +72,8 @@ split_step = ProcessingStep(
         "--stratify_target", TARGET_COLS[0],                   # literal OK
         "--targets_csv", ",".join(TARGET_COLS),                # literal OK
         "--input_features_csv", ",".join(INPUT_FEATURES),      # literal OK
-        "--val_frac",     val_frac_param.to_string(),          # <<< pipeline variable
-        "--random_seed",  seed_param.to_string(),              # <<< pipeline variable
+        "--val_frac",     val_frac_param.to_string(),          # pipeline variable
+        "--random_seed",  seed_param.to_string(),              # pipeline variable
         "--mounted_input_dir", "/opt/ml/processing/input",
         "--output_dir",   "/opt/ml/processing/output",
     ],
@@ -147,20 +149,19 @@ for tgt in TARGET_COLS:
     best_images[tgt] = img_uri
     best_datas[tgt]  = data_uri
 
-# --------- Lambda for MME deployment (validates same image; 1 instance) ----------
+# --------- Lambda for MME deployment (expects CSV strings) ----------
 deploy_lambda_src = r"""
-import boto3, os, time, json
+import boto3, os, time
 from urllib.parse import urlparse
 
 sm = boto3.client("sagemaker")
 s3 = boto3.client("s3")
 
 def _s3copy(src_uri, dst_uri):
-    def p(u):
-        up = urlparse(u)
-        return up.netloc, up.path.lstrip("/")
-    sb, sk = p(src_uri)
-    db, dk = p(dst_uri)
+    up = urlparse(src_uri)
+    sb, sk = up.netloc, up.path.lstrip("/")
+    up2 = urlparse(dst_uri)
+    db, dk = up2.netloc, up2.path.lstrip("/")
     s3.copy_object(Bucket=db, Key=dk, CopySource={"Bucket": sb, "Key": sk})
 
 def handler(event, context):
@@ -172,23 +173,28 @@ def handler(event, context):
     cap_pct     = int(event.get("CapturePercent", 100))
     mme_prefix  = event["ModelsPrefix"]   # s3://bucket/prefix/mme/{endpoint}/models/
 
-    targets = event["Targets"]  # list of dicts: { "name": "...", "image": "...", "model_data": "s3://.../model.tar.gz" }
+    names  = [x for x in event["TargetNamesCSV"].split(",")  if x]
+    images = [x for x in event["TargetImagesCSV"].split(",") if x]
+    datas  = [x for x in event["TargetModelDatasCSV"].split(",") if x]
 
-    images = { t["image"] for t in targets }
-    if len(images) != 1:
-        raise ValueError(f"MME requires a single container image. Found: {list(images)}.")
+    if not (len(names) == len(images) == len(datas)):
+        raise ValueError("Targets length mismatch among names/images/model_datas")
 
-    image = list(images)[0]
+    # Require a single container image across all targets for MME
+    if len(set(images)) != 1:
+        raise ValueError(f"MME requires a single container image. Found: {list(set(images))}")
+
+    image = images[0]
 
     up = urlparse(mme_prefix)
     dst_bucket, dst_key_prefix = up.netloc, up.path.lstrip("/")
     if not dst_key_prefix.endswith("/"):
         dst_key_prefix += "/"
 
-    for t in targets:
-        dst_key = f"{dst_key_prefix}{t['name']}.tar.gz"
+    for name, model_data in zip(names, datas):
+        dst_key = f"{dst_key_prefix}{name}.tar.gz"
         dst_uri = f"s3://{dst_bucket}/{dst_key}"
-        _s3copy(t["model_data"], dst_uri)
+        _s3copy(model_data, dst_uri)
 
     stamp = str(int(time.time()))
     model_name = f"{endpoint}-mme-model-{stamp}"
@@ -251,7 +257,7 @@ with open("deploy_mme_from_autopilot.py", "w") as f:
 deploy_lambda_name = f"{PROJECT_NAME}-deploy-mme-{int(time.time())}"
 deploy_lam = Lambda(
     function_name=deploy_lambda_name,
-    execution_role_arn=role_arn,  # role must allow SageMaker, S3 (Get/Put/Copy), logs
+    execution_role_arn=role_arn,
     script="deploy_mme_from_autopilot.py",
     handler="deploy_mme_from_autopilot.handler",
     timeout=600,
@@ -259,14 +265,10 @@ deploy_lam = Lambda(
     environment={"Variables": {"EXEC_ROLE_ARN": role_arn}},
 )
 
-# Build Lambda input payload from step properties (use .to_string() for pipeline vars/props)
-targets_payload = []
-for tgt in TARGET_COLS:
-    targets_payload.append({
-        "name": tgt,                                   # literal OK
-        "image":       best_images[tgt].to_string(),   # <<< pipeline variable
-        "model_data":  best_datas[tgt].to_string(),    # <<< pipeline variable
-    })
+# ---- Build CSV inputs for Lambda (strings/functions only; no nested objects) ----
+target_names_csv  = ",".join(TARGET_COLS)  # literal
+target_images_csv = Join(on=",", values=[best_images[t].to_string() for t in TARGET_COLS])
+target_datas_csv  = Join(on=",", values=[best_datas[t].to_string()  for t in TARGET_COLS])
 
 MME_MODELS_PREFIX = f"s3://{BUCKET}/{OUTPUT_PREFIX}/mme/{CLIENT_NAME}/{int(time.time())}/models/"
 
@@ -279,8 +281,10 @@ deploy_step = LambdaStep(
         "InitialInstanceCount":  InitialInstanceCount.to_string(),
         "DataCaptureS3Uri":      DataCaptureS3Param.to_string(),
         "CapturePercent":        CapturePercentParam.to_string(),
-        "ModelsPrefix":          MME_MODELS_PREFIX,      # literal OK
-        "Targets":               targets_payload,        # contains .to_string() items
+        "ModelsPrefix":          MME_MODELS_PREFIX,      # literal
+        "TargetNamesCSV":        target_names_csv,       # literal
+        "TargetImagesCSV":       target_images_csv,      # Pipeline function
+        "TargetModelDatasCSV":   target_datas_csv,       # Pipeline function
     },
     outputs=[LambdaOutput(output_name="status", output_type=LambdaOutputTypeEnum.String)]
 )
