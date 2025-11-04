@@ -1,6 +1,5 @@
 # ==========================================================
-# Cell 3: 4-target Autopilot V1 pipeline + MME deployment
-#         (FIX: use CSV strings in LambdaStep inputs)
+# Cell 3: Per-target Autopilot V1 + MME deployment (1 instance)
 # ==========================================================
 import time, json
 import boto3, sagemaker
@@ -13,7 +12,7 @@ from sagemaker.workflow.steps import ProcessingStep, CacheConfig
 from sagemaker.workflow.pipeline_context import PipelineSession
 from sagemaker.model import Model
 from sagemaker.workflow.step_collections import RegisterModel
-from sagemaker.workflow.functions import Join  # <<< important
+from sagemaker.workflow.functions import Join
 
 # Autopilot V1
 from sagemaker.automl.automl import AutoML, AutoMLInput
@@ -31,8 +30,10 @@ region = boto3.Session().region_name
 # --------- pipeline parameters ----------
 bucket_param       = ParameterString("Bucket",       default_value=BUCKET)
 input_s3_csv_param = ParameterString("InputS3CSV",   default_value=INPUT_S3CSV)
-val_frac_param     = ParameterFloat( "ValFrac",      default_value=0.2)
+val_frac_param     = ParameterFloat( "ValFrac",      default_value=VAL_FRAC_DEFAULT)
 seed_param         = ParameterInteger("RandomSeed",  default_value=42)
+min_support_param  = ParameterInteger("MinSupport",  default_value=MIN_SUPPORT_DEFAULT)
+rare_train_only_param = ParameterBoolean("RareTrainOnly", default_value=RARE_TRAIN_ONLY_DEFAULT)
 
 # Deployment params
 DeployAfterRegister   = ParameterBoolean(name="DeployAfterRegister", default_value=True)
@@ -46,7 +47,7 @@ CapturePercentParam   = ParameterInteger(name="CapturePercent", default_value=10
 PROBLEM_TYPE = "MulticlassClassification"
 OBJECTIVE    = "Accuracy"
 
-# --------- Step 1: Processing (split once, write per-target subsets) ----------
+# --------- Step 1: Processing (independent per-target splits) ----------
 img = sagemaker.image_uris.retrieve("sklearn", region, version="1.2-1")
 script_processor = ScriptProcessor(
     image_uri=img,
@@ -69,11 +70,12 @@ split_step = ProcessingStep(
     outputs=processing_outputs,
     code="prepare_per_target_splits.py",
     job_arguments=[
-        "--stratify_target", TARGET_COLS[0],                   # literal OK
         "--targets_csv", ",".join(TARGET_COLS),                # literal OK
         "--input_features_csv", ",".join(INPUT_FEATURES),      # literal OK
         "--val_frac",     val_frac_param.to_string(),          # pipeline variable
         "--random_seed",  seed_param.to_string(),              # pipeline variable
+        "--min_support",  min_support_param.to_string(),       # pipeline variable
+        "--rare_train_only", rare_train_only_param.to_string(),# pipeline variable
         "--mounted_input_dir", "/opt/ml/processing/input",
         "--output_dir",   "/opt/ml/processing/output",
     ],
@@ -135,7 +137,7 @@ def build_target_branch(target_name: str):
         transform_instances=["ml.m5.large"],
         model_package_group_name=f"{PROJECT_NAME}-pkg-group-{target_name}",
         approval_status="Approved",
-        description=f"Best model for target {target_name} (columns: {INPUT_FEATURES + [target_name]})",
+        description=f"Best model for target {target_name} (cols: {INPUT_FEATURES + [target_name]})",
     )
 
     return automl_step, register_step, best_image, best_data
@@ -283,8 +285,8 @@ deploy_step = LambdaStep(
         "CapturePercent":        CapturePercentParam.to_string(),
         "ModelsPrefix":          MME_MODELS_PREFIX,      # literal
         "TargetNamesCSV":        target_names_csv,       # literal
-        "TargetImagesCSV":       target_images_csv,      # Pipeline function
-        "TargetModelDatasCSV":   target_datas_csv,       # Pipeline function
+        "TargetImagesCSV":       target_images_csv,      # pipeline function
+        "TargetModelDatasCSV":   target_datas_csv,       # pipeline function
     },
     outputs=[LambdaOutput(output_name="status", output_type=LambdaOutputTypeEnum.String)]
 )
@@ -302,6 +304,7 @@ pipeline = Pipeline(
     name=f"{PROJECT_NAME}-pipeline-4targets-mme",
     parameters=[
         bucket_param, input_s3_csv_param, val_frac_param, seed_param,
+        min_support_param, rare_train_only_param,
         DeployAfterRegister, EndpointNameParam, InstanceTypeParam, InitialInstanceCount,
         DataCaptureS3Param, CapturePercentParam
     ],

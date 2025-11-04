@@ -20,10 +20,15 @@ BUCKET       = sm_sess.default_bucket()                 # or set your own
 INPUT_S3CSV  = f"s3://{BUCKET}/input/data.csv"         # must exist; header present
 DATA_PREFIX  = f"s3://{BUCKET}/{OUTPUT_PREFIX}"
 
-# ---- Targets (edit if fewer)
-TARGET_COLS      = ["DepartmentCode", "AccountCode", "SubAccountCode", "LocationCode"]
+# ---- Targets (edit per client)
+TARGET_COLS    = ["DepartmentCode", "AccountCode", "SubAccountCode", "LocationCode"]
 # ---- Inputs (the only features that will be kept)
-INPUT_FEATURES   = ["VendorName", "LineDescription", "ClubNumber"]
+INPUT_FEATURES = ["VendorName", "LineDescription", "ClubNumber"]
+
+# ---- Split policy (tunable per client)
+VAL_FRAC_DEFAULT   = 0.20   # default validation fraction
+MIN_SUPPORT_DEFAULT = 5     # classes with < MIN_SUPPORT go to train only
+RARE_TRAIN_ONLY_DEFAULT = True  # send rare classes entirely to train
 
 def _parse_s3(uri: str):
     if not uri.startswith("s3://"):
