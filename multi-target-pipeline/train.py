@@ -40,8 +40,6 @@ DeployAfterRegister   = ParameterBoolean(name="DeployAfterRegister", default_val
 EndpointNameParam     = ParameterString(name="EndpointName", default_value=f"{PROJECT_NAME}-codes-mme")
 InstanceTypeParam     = ParameterString(name="InstanceType", default_value="ml.m5.large")
 InitialInstanceCount  = ParameterInteger(name="InitialInstanceCount", default_value=1)
-DataCaptureS3Param    = ParameterString(name="DataCaptureS3Uri", default_value=f"s3://{BUCKET}/{OUTPUT_PREFIX}/data-capture/")
-CapturePercentParam   = ParameterInteger(name="CapturePercent", default_value=100)
 
 # literals
 PROBLEM_TYPE = "MulticlassClassification"
@@ -171,8 +169,6 @@ def handler(event, context):
     inst_type  = event["InstanceType"]
     init_count = int(event["InitialInstanceCount"])
     exec_role  = os.environ["EXEC_ROLE_ARN"]
-    data_cap_s3 = event["DataCaptureS3Uri"]
-    cap_pct     = int(event.get("CapturePercent", 100))
     mme_prefix  = event["ModelsPrefix"]   # s3://bucket/prefix/mme/{endpoint}/models/
 
     names  = [x for x in event["TargetNamesCSV"].split(",")  if x]
@@ -219,17 +215,8 @@ def handler(event, context):
             "ModelName": model_name,
             "InstanceType": inst_type,
             "InitialInstanceCount": init_count
-        }],
-        DataCaptureConfig={
-            "EnableCapture": True,
-            "InitialSamplingPercentage": cap_pct,
-            "DestinationS3Uri": data_cap_s3,
-            "CaptureOptions": [{"CaptureMode": "Input"}, {"CaptureMode": "Output"}],
-            "CaptureContentTypeHeader": {
-                "CsvContentTypes": ["text/csv"],
-                "JsonContentTypes": ["application/json"]
-            }
-        }
+        }]
+        # DataCaptureConfig removed for MME
     )
 
     try:
@@ -281,8 +268,6 @@ deploy_step = LambdaStep(
         "EndpointName":          EndpointNameParam.to_string(),
         "InstanceType":          InstanceTypeParam.to_string(),
         "InitialInstanceCount":  InitialInstanceCount.to_string(),
-        "DataCaptureS3Uri":      DataCaptureS3Param.to_string(),
-        "CapturePercent":        CapturePercentParam.to_string(),
         "ModelsPrefix":          MME_MODELS_PREFIX,      # literal
         "TargetNamesCSV":        target_names_csv,       # literal
         "TargetImagesCSV":       target_images_csv,      # pipeline function
@@ -305,8 +290,7 @@ pipeline = Pipeline(
     parameters=[
         bucket_param, input_s3_csv_param, val_frac_param, seed_param,
         min_support_param, rare_train_only_param,
-        DeployAfterRegister, EndpointNameParam, InstanceTypeParam, InitialInstanceCount,
-        DataCaptureS3Param, CapturePercentParam
+        DeployAfterRegister, EndpointNameParam, InstanceTypeParam, InitialInstanceCount
     ],
     steps=[split_step] + branches + [deploy_condition_step],
     sagemaker_session=p_sess,
