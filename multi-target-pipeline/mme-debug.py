@@ -1,87 +1,95 @@
+# === SageMaker MME End-to-End Debug + Invoke (copy-paste and run) ===
 import boto3, io, csv, json, time
 from urllib.parse import urlparse
 
-ENDPOINT = "<YOUR-ENDPOINT-NAME>"   # e.g., client1-autopilot-v1-codes-mme
-# Your features in EXACT training order:
-FEATURES = ["ACME LLC", "12 pack lemon water", 42]  # use a description WITHOUT commas first to rule out CSV parsing
+ENDPOINT = "client1-autopilot-v1-codes-mme"   # <-- Your endpoint name (with hyphens)
 
-sm = boto3.client("sagemaker")
-smr = boto3.client("sagemaker-runtime")
-s3  = boto3.client("s3")
+# Put a simple, comma-safe sample first (no commas in text) to rule out CSV parsing issues.
+# Feature order MUST match training: ["VendorName","LineDescription","ClubNumber"]
+SAMPLE_FEATURES = ["ACME LLC", "12 pack lemon water", 42]
+
+sm   = boto3.client("sagemaker")
+smr  = boto3.client("sagemaker-runtime")
+s3   = boto3.client("s3")
 logs = boto3.client("logs")
 
 def csv_line(vals, safe=False):
     """
-    If safe=True, builds a 'bare' CSV line without quotes where possible, to avoid container CSV quirks.
-    Start with safe=True to avoid commas/quotes. If that works, switch back to proper quoting.
+    Build one CSV line (no header).
+    If safe=True, avoid quotes/commas to bypass container CSV quirks on first try.
     """
     if safe:
-        # crude but effective: quote only if needed
         def q(v):
             s = str(v)
-            return s if ("," not in s and '"' not in s and "\n" not in s) else f'"{s.replace("\"","\"\"")}"'
+            if ("," in s) or ('"' in s) or ("\n" in s):
+                s = s.replace('"', '""')
+                return f'"{s}"'
+            return s
         return ",".join(q(v) for v in vals)
     buf = io.StringIO()
     csv.writer(buf, lineterminator="").writerow(vals)
     return buf.getvalue()
 
 def describe_endpoint_details(ep):
-    d = sm.describe_endpoint(EndpointName=ep)
+    d   = sm.describe_endpoint(EndpointName=ep)
     cfg = sm.describe_endpoint_config(EndpointConfigName=d["EndpointConfigName"])
-    model_name = cfg["ProductionVariants"][0]["ModelName"]
-    md = sm.describe_model(ModelName=model_name)
-    container = md["PrimaryContainer"]
-    role = md["ExecutionRoleArn"]
-    model_data_url = container["ModelDataUrl"]  # should be an S3 PREFIX for MME
-    image = container["Image"]
+    mdl_name = cfg["ProductionVariants"][0]["ModelName"]
+    md  = sm.describe_model(ModelName=mdl_name)
+    cont = md["PrimaryContainer"]
     return {
         "EndpointStatus": d["EndpointStatus"],
-        "ModelName": model_name,
-        "ExecutionRoleArn": role,
-        "ModelDataUrl": model_data_url,
-        "Image": image,
+        "EndpointConfigName": d["EndpointConfigName"],
+        "ModelName": mdl_name,
+        "ExecutionRoleArn": md["ExecutionRoleArn"],
+        "Image": cont["Image"],
+        "ModelDataUrl": cont["ModelDataUrl"],  # for MME this is an S3 PREFIX (ends with /)
     }
 
-def list_mme_objects(model_data_url):
+def list_mme_models(model_data_url):
     up = urlparse(model_data_url)
     bucket, prefix = up.netloc, up.path.lstrip("/")
     if prefix and not prefix.endswith("/"):
         prefix += "/"
-    objs = []
-    token = None
+    keys, token = [], None
     while True:
-        kw = dict(Bucket=bucket, Prefix=prefix, MaxKeys=1000)
-        if token: kw["ContinuationToken"] = token
-        r = s3.list_objects_v2(**kw)
-        objs += [o["Key"] for o in r.get("Contents", [])]
+        kwargs = dict(Bucket=bucket, Prefix=prefix, MaxKeys=1000)
+        if token: kwargs["ContinuationToken"] = token
+        r = s3.list_objects_v2(**kwargs)
+        keys.extend([o["Key"] for o in r.get("Contents", [])])
         token = r.get("NextContinuationToken")
         if not token: break
-    # Return basenames relative to the prefix (what TargetModel must be)
-    rel = []
-    for k in objs:
-        if k.endswith(".tar.gz"):
-            rel.append(k[len(prefix):])
+    # Relative names under the MME prefix are what TargetModel must be
+    rel = [k[len(prefix):] for k in keys if k.endswith(".tar.gz")]
     return bucket, prefix, sorted(rel)
 
-def try_invoke(ep, target_model, features, content_type="text/csv", accept="application/json", safe_csv=True):
+def invoke(ep, target_model, features, safe_csv=True, content_type="text/csv", accept="application/json"):
     body = csv_line(features, safe=safe_csv).encode("utf-8")
+    r = smr.invoke_endpoint(
+        EndpointName=ep,
+        ContentType=content_type,
+        Accept=accept,
+        Body=body,
+        TargetModel=target_model,
+    )
+    out = r["Body"].read().decode("utf-8", errors="replace")
     try:
-        r = smr.invoke_endpoint(
-            EndpointName=ep,
-            ContentType=content_type,
-            Accept=accept,
-            Body=body,
-            TargetModel=target_model,
-        )
-        out = r["Body"].read().decode("utf-8", errors="replace")
-        try:
-            return True, json.dumps(json.loads(out), indent=2)
-        except Exception:
-            return True, out
-    except Exception as e:
-        return False, f"{type(e).__name__}: {e}"
+        return True, json.dumps(json.loads(out), indent=2)
+    except Exception:
+        return True, out
 
-def latest_log_stream_name(ep):
+def try_invoke(ep, target_model, features):
+    try:
+        ok, out = invoke(ep, target_model, features, safe_csv=True)
+        return ok, out
+    except Exception as e1:
+        # Retry with strict CSV quoting (handles commas/quotes)
+        try:
+            ok, out = invoke(ep, target_model, features, safe_csv=False)
+            return ok, out
+        except Exception as e2:
+            return False, f"{type(e2).__name__}: {e2}"
+
+def latest_log_stream(ep):
     group = f"/aws/sagemaker/Endpoints/{ep}"
     r = logs.describe_log_streams(
         logGroupName=group,
@@ -93,39 +101,49 @@ def latest_log_stream_name(ep):
         return group, None
     return group, r["logStreams"][0]["logStreamName"]
 
-def tail_endpoint_logs(ep, limit=100):
-    group, stream = latest_log_stream_name(ep)
+def tail_logs(ep, limit=120):
+    group, stream = latest_log_stream(ep)
     if not stream:
-        return f"(No logs found for {group})"
+        return f"(No CloudWatch logs found for {group})"
     r = logs.get_log_events(logGroupName=group, logStreamName=stream, startFromHead=False, limit=limit)
-    lines = [e["message"] for e in r.get("events", [])]
-    return "\n".join(lines[-limit:])
+    return "\n".join(e["message"] for e in r.get("events", []))
 
-# ---- Run checks ----
+# --- Run ---
+print("Region:", boto3.Session().region_name)
 info = describe_endpoint_details(ENDPOINT)
-print("Endpoint:", ENDPOINT)
+print("\n=== Endpoint ===")
 print(json.dumps(info, indent=2))
 
-bucket, prefix, models = list_mme_objects(info["ModelDataUrl"])
-print("\nMME S3 prefix:", f"s3://{bucket}/{prefix}")
-print("Discovered model files (relative names to use as TargetModel):")
+status = info["EndpointStatus"]
+if status != "InService":
+    raise SystemExit(f"Endpoint status is {status}. Wait until InService, then retry.")
+
+bucket, prefix, models = list_mme_models(info["ModelDataUrl"])
+print("\n=== MME Prefix ===")
+print("S3:", f"s3://{bucket}/{prefix}")
+print("\n=== Available models (use these as TargetModel) ===")
 for m in models:
-    print("  -", m)
-
+    print(" -", m)
 if not models:
-    print("\n!! No .tar.gz models found under the MME prefix. Deployment likely didn’t copy artifacts.")
-else:
-    print("\n=== Invoking each discovered model (safe CSV first) ===")
-    for m in models:
-        ok, out = try_invoke(ENDPOINT, m, FEATURES, safe_csv=True)
-        print(f"\n[{m}] success={ok}")
-        print(out[:2000])
+    raise SystemExit("No .tar.gz models found under MME prefix. Recheck deployment/copy step.")
 
-    print("\n=== If all failed, retry first model with strict CSV quoting ===")
-    m0 = models[0]
-    ok, out = try_invoke(ENDPOINT, m0, FEATURES, safe_csv=False)
-    print(f"\n[{m0} strict CSV] success={ok}")
+# Try invoking each discovered model with a simple CSV first
+print("\n=== Invoking each model ===")
+for m in models:
+    ok, out = try_invoke(ENDPOINT, m, SAMPLE_FEATURES)
+    print(f"\n[{m}] success={ok}")
     print(out[:2000])
 
-print("\n=== Recent endpoint logs (last ~100 lines) ===")
-print(tail_endpoint_logs(ENDPOINT, limit=120))
+# Optional: try a more realistic description with a comma (strict CSV will handle it)
+REALISTIC_SAMPLE = ["ACME LLC", "12-pack sparkling water, lemon", 42]
+m0 = models[0]
+print(f"\n=== Extra check (first model, realistic sample) -> {m0} ===")
+try:
+    ok, out = try_invoke(ENDPOINT, m0, REALISTIC_SAMPLE)
+    print(f"success={ok}")
+    print(out[:2000])
+except Exception as e:
+    print("Invoke failed:", e)
+
+print("\n=== Recent endpoint logs (last ~120 lines) ===")
+print(tail_logs(ENDPOINT, limit=120))
