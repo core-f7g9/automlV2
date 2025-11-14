@@ -15,11 +15,9 @@ from sagemaker.model import Model
 from sagemaker.workflow.step_collections import RegisterModel
 from sagemaker.workflow.functions import Join
 
-# Autopilot V1
 from sagemaker.automl.automl import AutoML, AutoMLInput
 from sagemaker.workflow.automl_step import AutoMLStep
 
-# Lambda deployment
 from sagemaker.workflow.lambda_step import LambdaStep, LambdaOutput, LambdaOutputTypeEnum
 from sagemaker.lambda_helper import Lambda
 from sagemaker.workflow.conditions import ConditionEquals
@@ -28,7 +26,6 @@ from sagemaker.workflow.condition_step import ConditionStep
 p_sess = PipelineSession()
 region = boto3.Session().region_name
 
-# --------- pipeline parameters ----------
 bucket_param       = ParameterString("Bucket",       default_value=BUCKET)
 input_s3_csv_param = ParameterString("InputS3CSV",   default_value=INPUT_S3CSV)
 val_frac_param     = ParameterFloat( "ValFrac",      default_value=VAL_FRAC_DEFAULT)
@@ -36,17 +33,14 @@ seed_param         = ParameterInteger("RandomSeed",  default_value=42)
 min_support_param  = ParameterInteger("MinSupport",  default_value=MIN_SUPPORT_DEFAULT)
 rare_train_only_param = ParameterBoolean("RareTrainOnly", default_value=RARE_TRAIN_ONLY_DEFAULT)
 
-# Deployment params
 DeployAfterRegister   = ParameterBoolean(name="DeployAfterRegister", default_value=True)
 EndpointNameParam     = ParameterString(name="EndpointName", default_value=f"{PROJECT_NAME}-codes-mme")
 InstanceTypeParam     = ParameterString(name="InstanceType", default_value="ml.m5.large")
 InitialInstanceCount  = ParameterInteger(name="InitialInstanceCount", default_value=1)
 
-# literals
 PROBLEM_TYPE = "MulticlassClassification"
 OBJECTIVE    = "Accuracy"
 
-# --------- Step 1: Processing (independent per-target splits) ----------
 img = sagemaker.image_uris.retrieve("sklearn", region, version="1.2-1")
 split_processor = ScriptProcessor(
     image_uri=img,
@@ -89,7 +83,6 @@ split_step = ProcessingStep(
     cache_config=CacheConfig(enable_caching=True, expire_after="7d"),
 )
 
-# --------- Per-target Autopilot + Register ----------
 def build_target_branch(target_name: str):
     train_s3 = split_step.properties.ProcessingOutputConfig.Outputs[f"train_{target_name}"].S3Output.S3Uri
     val_s3   = split_step.properties.ProcessingOutputConfig.Outputs[f"validation_{target_name}"].S3Output.S3Uri
@@ -122,8 +115,7 @@ def build_target_branch(target_name: str):
         total_job_runtime_in_seconds=6*3600
     )
 
-    step_args = automl.fit(inputs=auto_inputs)
-    automl_step = AutoMLStep(name=f"RunAutopilotV1_{target_name}", step_args=step_args)
+    automl_step = AutoMLStep(name=f"RunAutopilotV1_{target_name}", step_args=automl.fit(inputs=auto_inputs))
 
     best_image = automl_step.properties.BestCandidate.InferenceContainers[0].Image
     best_data  = automl_step.properties.BestCandidate.InferenceContainers[0].ModelDataUrl
@@ -140,7 +132,7 @@ def build_target_branch(target_name: str):
         outputs=[
             ProcessingOutput(
                 output_name="repacked_model",
-                source="/opt/ml/processing/output/repacked"
+                source="/opt/ml/processing/output/repacked_model"
             )
         ],
         code="repack_for_mme.py",
@@ -148,11 +140,12 @@ def build_target_branch(target_name: str):
             "--target_name", target_name,
             "--feature_list_csv", ",".join(INPUT_FEATURES),
             "--input_dir", "/opt/ml/processing/input/model",
-            "--output_dir", "/opt/ml/processing/output/repacked",
+            "--output_dir", "/opt/ml/processing/output/repacked_model",
         ],
     )
 
-    repacked_model_s3 = repack_step.properties.ProcessingOutputConfig.Outputs["repacked_model"].S3Output.S3Uri
+    repacked_prefix = repack_step.properties.ProcessingOutputConfig.Outputs["repacked_model"].S3Output.S3Uri
+    repacked_model_s3 = Join(on="", values=[repacked_prefix, "/model.tar.gz"])
 
     model_to_register = Model(
         image_uri=best_image,
@@ -184,7 +177,6 @@ for tgt in TARGET_COLS:
     best_images[tgt] = img_uri
     best_datas[tgt]  = data_uri
 
-# --------- Lambda for MME deployment (expects CSV strings) ----------
 deploy_lambda_src = r"""
 import boto3, os, time
 from urllib.parse import urlparse
@@ -204,7 +196,7 @@ def handler(event, context):
     inst_type  = event["InstanceType"]
     init_count = int(event["InitialInstanceCount"])
     exec_role  = os.environ["EXEC_ROLE_ARN"]
-    mme_prefix  = event["ModelsPrefix"]
+    mme_prefix = event["ModelsPrefix"]
 
     names  = [x for x in event["TargetNamesCSV"].split(",")  if x]
     images = [x for x in event["TargetImagesCSV"].split(",") if x]

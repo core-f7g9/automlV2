@@ -1,3 +1,4 @@
+# multi-target-pipeline/setup.py
 # =========================
 # Cell 1: Setup variables
 # =========================
@@ -26,9 +27,9 @@ TARGET_COLS    = ["DepartmentCode", "AccountCode", "SubAccountCode", "LocationCo
 INPUT_FEATURES = ["VendorName", "LineDescription", "ClubNumber"]
 
 # ---- Split policy (tunable per client)
-VAL_FRAC_DEFAULT   = 0.20   # default validation fraction
-MIN_SUPPORT_DEFAULT = 5     # classes with < MIN_SUPPORT go to train only
-RARE_TRAIN_ONLY_DEFAULT = True  # send rare classes entirely to train
+VAL_FRAC_DEFAULT       = 0.20
+MIN_SUPPORT_DEFAULT    = 5
+RARE_TRAIN_ONLY_DEFAULT = True
 
 def _parse_s3(uri: str):
     if not uri.startswith("s3://"):
@@ -40,7 +41,6 @@ def _parse_s3(uri: str):
         raise ValueError(f"Malformed S3 URI: {uri}")
     return bucket, key
 
-# ---- Early sanity: CSV must exist
 s3 = boto3.client("s3", region_name=region)
 csv_bucket, csv_key = _parse_s3(INPUT_S3CSV)
 try:
