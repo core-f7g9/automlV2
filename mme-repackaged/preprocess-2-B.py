@@ -153,7 +153,7 @@ def _find_model_file(model_dir):
             lower = name.lower()
             if lower.endswith((".pkl", ".pickle", ".joblib")):
                 return os.path.join(root, name)
-    raise FileNotFoundError("Could not locate serialized model file under {}".format(model_dir))
+    raise FileNotFoundError("Could not locate serialized model file under {{}}".format(model_dir))
 
 def model_fn(model_dir):
     model_path = _find_model_file(model_dir)
@@ -161,14 +161,14 @@ def model_fn(model_dir):
 
 def input_fn(request_body, content_type):
     if content_type != "text/csv":
-        raise ValueError("Unsupported content type: {}".format(content_type))
+        raise ValueError("Unsupported content type: {{}}".format(content_type))
     if isinstance(request_body, (bytes, bytearray)):
         request_body = request_body.decode("utf-8")
     reader = csv.reader(io.StringIO(request_body))
     row = next(reader)
     expected = len(FEATURE_COLUMNS)
     if len(row) != expected:
-        raise ValueError("Expected {} features, got {}".format(expected, len(row)))
+        raise ValueError("Expected {{}} features, got {{}}".format(expected, len(row)))
     parsed = []
     for val in row:
         if val in ("", None):
@@ -183,16 +183,16 @@ def input_fn(request_body, content_type):
     return frame
 
 def predict_fn(input_data, model):
-    result = {"target": TARGET_NAME}
+    result = {{"target": TARGET_NAME}}
     preds = model.predict(input_data)
     result["label"] = preds[0]
     if hasattr(model, "predict_proba"):
         try:
             probs = model.predict_proba(input_data)[0]
             classes = getattr(model, "classes_", list(range(len(probs))))
-            result["probabilities"] = {
+            result["probabilities"] = {{
                 str(cls): float(prob) for cls, prob in zip(classes, probs)
-            }
+            }}
         except Exception:
             pass
     return result
