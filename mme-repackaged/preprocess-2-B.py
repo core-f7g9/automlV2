@@ -245,11 +245,10 @@ def main():
         with open(script_path, "w") as f:
             f.write(script_text)
 
-        # Ensure botocore/boto3 are available in the container
         req_path = os.path.join(code_dir, "requirements.txt")
+        reqs = r"botocore\nboto3\n"
         with open(req_path, "w") as f:
-            f.write("botocore\nboto3\n")
-
+            f.write(reqs)
         os.makedirs(args.output_dir, exist_ok=True)
         dst_tar = os.path.join(args.output_dir, "model.tar.gz")
         with tarfile.open(dst_tar, "w:gz") as tar:
