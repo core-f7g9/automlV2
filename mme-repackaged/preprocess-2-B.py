@@ -239,9 +239,16 @@ def main():
 
         code_dir = os.path.join(work_dir, "code")
         os.makedirs(code_dir, exist_ok=True)
+
+        # Write inference.py
         script_path = os.path.join(code_dir, args.inference_filename)
         with open(script_path, "w") as f:
             f.write(script_text)
+
+        # Ensure botocore/boto3 are available in the container
+        req_path = os.path.join(code_dir, "requirements.txt")
+        with open(req_path, "w") as f:
+            f.write("botocore\nboto3\n")
 
         os.makedirs(args.output_dir, exist_ok=True)
         dst_tar = os.path.join(args.output_dir, "model.tar.gz")
