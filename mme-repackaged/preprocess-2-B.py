@@ -133,16 +133,23 @@ import tarfile
 import tempfile
 import textwrap
 import json
+import subprocess
+import sys
 
 INFERENCE_TEMPLATE = \"\"\"
+import os, site
 import csv
 import io
 import json
-import os
 
 import joblib
 import numpy as np
 import pandas as pd
+
+BASE_DIR = os.path.dirname(__file__)
+DEPS_DIR = os.path.join(BASE_DIR, "dependencies")
+if os.path.isdir(DEPS_DIR):
+    site.addsitedir(DEPS_DIR)
 
 FEATURE_COLUMNS = {feature_list}
 TARGET_NAME = "{target_name}"
@@ -258,6 +265,11 @@ def main():
         ]) + "\\n"
         with open(req_path, "w") as f:
             f.write(reqs)
+
+        # Vendor dependencies into the artifact so the container doesn't need internet
+        deps_dir = os.path.join(work_dir, "dependencies")
+        os.makedirs(deps_dir, exist_ok=True)
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", "-r", req_path, "-t", deps_dir])
 
         # Explicitly tell the MMS runtime which module to import for this model
         with open(os.path.join(work_dir, ".sagemaker-inference.json"), "w") as f:

@@ -59,6 +59,9 @@ repack_processor = ScriptProcessor(
     sagemaker_session=p_sess,
 )
 
+# Use a stable serving image for all models to ensure MME compatibility and required libs (boto3/botocore)
+serve_image = img
+
 processing_outputs = []
 for tgt in TARGET_COLS:
     processing_outputs.append(ProcessingOutput(output_name=f"train_{tgt}",      source=f"/opt/ml/processing/output/{tgt}/train"))
@@ -117,7 +120,6 @@ def build_target_branch(target_name: str):
 
     automl_step = AutoMLStep(name=f"RunAutopilotV1_{target_name}", step_args=automl.fit(inputs=auto_inputs))
 
-    best_image = automl_step.properties.BestCandidate.InferenceContainers[0].Image
     best_data  = automl_step.properties.BestCandidate.InferenceContainers[0].ModelDataUrl
 
     repack_step = ProcessingStep(
@@ -148,7 +150,7 @@ def build_target_branch(target_name: str):
     repacked_model_s3 = Join(on="", values=[repacked_prefix, "/model.tar.gz"])
 
     model_to_register = Model(
-        image_uri=best_image,
+        image_uri=serve_image,
         model_data=repacked_model_s3,
         role=role_arn,
         sagemaker_session=p_sess,
@@ -166,7 +168,7 @@ def build_target_branch(target_name: str):
         description=f"Best model for target {target_name} (cols: {INPUT_FEATURES + [target_name]})",
     )
 
-    return automl_step, repack_step, register_step, best_image, repacked_model_s3
+    return automl_step, repack_step, register_step, serve_image, repacked_model_s3
 
 branches = []
 best_images = {}
