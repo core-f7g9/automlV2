@@ -237,16 +237,14 @@ def main():
         with tarfile.open(src_tar, "r:gz") as tar:
             tar.extractall(work_dir)
 
-        code_dir = os.path.join(work_dir, "code")
-        os.makedirs(code_dir, exist_ok=True)
-
-        # Write inference.py
-        script_path = os.path.join(code_dir, args.inference_filename)
+        # For MME the loader sets SAGEMAKER_SUBMIT_DIRECTORY to the extracted model root,
+        # so keep inference.py / requirements.txt at the top level (not under code/).
+        script_path = os.path.join(work_dir, args.inference_filename)
         with open(script_path, "w") as f:
             f.write(script_text)
 
         # Keep dependencies explicit for the inference container
-        req_path = os.path.join(code_dir, "requirements.txt")
+        req_path = os.path.join(work_dir, "requirements.txt")
         reqs = "\\n".join([
             "pandas",
             "numpy",
@@ -262,7 +260,7 @@ def main():
             f.write(reqs)
 
         # Explicitly tell the MMS runtime which module to import for this model
-        with open(os.path.join(code_dir, ".sagemaker-inference.json"), "w") as f:
+        with open(os.path.join(work_dir, ".sagemaker-inference.json"), "w") as f:
             json.dump({"program": args.inference_filename}, f)
 
         os.makedirs(args.output_dir, exist_ok=True)
