@@ -245,8 +245,16 @@ def main():
         with open(script_path, "w") as f:
             f.write(script_text)
 
+        # Keep dependencies explicit for the inference container
         req_path = os.path.join(code_dir, "requirements.txt")
-        reqs = r"botocore\nboto3\n"
+        reqs = "\n".join([
+            "pandas",
+            "numpy",
+            "joblib",
+            "scikit-learn",
+            "boto3",
+            "botocore",
+        ]) + "\n"
         with open(req_path, "w") as f:
             f.write(reqs)
         os.makedirs(args.output_dir, exist_ok=True)
