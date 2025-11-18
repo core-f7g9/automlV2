@@ -138,7 +138,6 @@ import os, site
 import csv
 import io
 import json
-
 import joblib
 import numpy as np
 import pandas as pd
@@ -238,19 +237,17 @@ def main():
 
     work_dir = tempfile.mkdtemp(prefix="repack-")
     try:
+        # Extract the original Autopilot model tar.gz
         with tarfile.open(src_tar, "r:gz") as tar:
             tar.extractall(work_dir)
 
-        code_dir = os.path.join(work_dir, "code")
-        os.makedirs(code_dir, exist_ok=True)
-
-        # Put inference and requirements under code/ as expected by the SKLearn serving container
-        script_path = os.path.join(code_dir, args.inference_filename)
+        # Write inference.py at the root of the model directory
+        script_path = os.path.join(work_dir, args.inference_filename)
         with open(script_path, "w") as f:
             f.write(script_text)
 
-        # Keep dependencies explicit for the inference container
-        req_path = os.path.join(code_dir, "requirements.txt")
+        # Write requirements.txt listing *only* the libs we need
+        req_path = os.path.join(work_dir, "requirements.txt")
         reqs = "\\n".join([
             "pandas",
             "numpy",
@@ -259,18 +256,22 @@ def main():
             "xgboost",
             "lightgbm",
             "catboost",
-            "boto3",
-            "botocore",
         ]) + "\\n"
         with open(req_path, "w") as f:
             f.write(reqs)
 
-        # Vendor dependencies into the artifact so the container doesn't need internet
-        deps_dir = os.path.join(code_dir, "dependencies")
+        # Vendor dependencies into 'dependencies' so container doesn't need internet
+        deps_dir = os.path.join(work_dir, "dependencies")
         os.makedirs(deps_dir, exist_ok=True)
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", "-r", req_path, "-t", deps_dir])
+        subprocess.check_call([
+            sys.executable,
+            "-m", "pip", "install",
+            "--no-cache-dir",
+            "-r", req_path,
+            "-t", deps_dir
+        ])
 
-        # Explicitly tell the MMS runtime which module to import for this model
+        # Tell SageMaker which program to use
         with open(os.path.join(work_dir, ".sagemaker-inference.json"), "w") as f:
             json.dump({"program": args.inference_filename}, f)
 

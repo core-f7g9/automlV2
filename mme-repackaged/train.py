@@ -270,7 +270,7 @@ def handler(event, context):
 with open("deploy_mme_from_autopilot.py", "w") as f:
     f.write(deploy_lambda_src)
 
-deploy_lambda_name = f"{PROJECT_NAME}-deploy-mme-{int(time.time())}"
+deploy_lambda_name = f"{PROJECT_NAME}-deploy-mme"
 deploy_lam = Lambda(
     function_name=deploy_lambda_name,
     execution_role_arn=role_arn,
@@ -285,7 +285,7 @@ target_names_csv  = ",".join(TARGET_COLS)
 target_images_csv = ",".join([serve_image for _ in TARGET_COLS])  # literal CSV of one shared image
 target_datas_csv  = Join(on=",", values=[best_datas[t] for t in TARGET_COLS])
 
-MME_MODELS_PREFIX = f"s3://{BUCKET}/{OUTPUT_PREFIX}/mme/{CLIENT_NAME}/{int(time.time())}/models/"
+MME_MODELS_PREFIX = f"s3://{BUCKET}/{OUTPUT_PREFIX}/mme/{CLIENT_NAME}/models/"
 
 deploy_step = LambdaStep(
     name="DeployAllOnOneInstance_MME",
