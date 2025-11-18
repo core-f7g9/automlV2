@@ -241,14 +241,16 @@ def main():
         with tarfile.open(src_tar, "r:gz") as tar:
             tar.extractall(work_dir)
 
-        # For MME the loader sets SAGEMAKER_SUBMIT_DIRECTORY to the extracted model root,
-        # so keep inference.py / requirements.txt at the top level (not under code/).
-        script_path = os.path.join(work_dir, args.inference_filename)
+        code_dir = os.path.join(work_dir, "code")
+        os.makedirs(code_dir, exist_ok=True)
+
+        # Put inference and requirements under code/ as expected by the SKLearn serving container
+        script_path = os.path.join(code_dir, args.inference_filename)
         with open(script_path, "w") as f:
             f.write(script_text)
 
         # Keep dependencies explicit for the inference container
-        req_path = os.path.join(work_dir, "requirements.txt")
+        req_path = os.path.join(code_dir, "requirements.txt")
         reqs = "\\n".join([
             "pandas",
             "numpy",
@@ -264,7 +266,7 @@ def main():
             f.write(reqs)
 
         # Vendor dependencies into the artifact so the container doesn't need internet
-        deps_dir = os.path.join(work_dir, "dependencies")
+        deps_dir = os.path.join(code_dir, "dependencies")
         os.makedirs(deps_dir, exist_ok=True)
         subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", "-r", req_path, "-t", deps_dir])
 
