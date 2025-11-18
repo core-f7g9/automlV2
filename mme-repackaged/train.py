@@ -282,8 +282,8 @@ deploy_lam = Lambda(
 )
 
 target_names_csv  = ",".join(TARGET_COLS)
-target_images_csv = Join(on=",", values=[best_images[t].to_string() for t in TARGET_COLS])
-target_datas_csv  = Join(on=",", values=[best_datas[t].to_string()  for t in TARGET_COLS])
+target_images_csv = ",".join([serve_image for _ in TARGET_COLS])  # literal CSV of one shared image
+target_datas_csv  = Join(on=",", values=[best_datas[t] for t in TARGET_COLS])
 
 MME_MODELS_PREFIX = f"s3://{BUCKET}/{OUTPUT_PREFIX}/mme/{CLIENT_NAME}/{int(time.time())}/models/"
 
