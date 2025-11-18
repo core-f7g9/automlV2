@@ -247,20 +247,32 @@ def main():
 
         # Keep dependencies explicit for the inference container
         req_path = os.path.join(code_dir, "requirements.txt")
-        reqs = "\n".join([
+        reqs = "\\n".join([
             "pandas",
             "numpy",
             "joblib",
             "scikit-learn",
+            "xgboost",
+            "lightgbm",
+            "catboost",
             "boto3",
             "botocore",
-        ]) + "\n"
+        ]) + "\\n"
         with open(req_path, "w") as f:
             f.write(reqs)
+
+        # Explicitly tell the MMS runtime which module to import for this model
+        with open(os.path.join(code_dir, ".sagemaker-inference.json"), "w") as f:
+            json.dump({"program": args.inference_filename}, f)
+
         os.makedirs(args.output_dir, exist_ok=True)
         dst_tar = os.path.join(args.output_dir, "model.tar.gz")
         with tarfile.open(dst_tar, "w:gz") as tar:
-            tar.add(work_dir, arcname=".")
+            for root, _, files in os.walk(work_dir):
+                for name in sorted(files):
+                    path = os.path.join(root, name)
+                    arcname = os.path.relpath(path, start=work_dir)
+                    tar.add(path, arcname=arcname)
 
         print(f"Repacked model for target {args.target_name} -> {dst_tar}")
     finally:
