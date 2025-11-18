@@ -109,9 +109,6 @@ def main():
         train.to_csv(os.path.join(out_dir_tr, "train.csv"), index=False)
         val.to_csv(os.path.join(out_dir_va, "validation.csv"), index=False)
 
-        print(f"[{tgt}] class_counts={{{k: counts[k] for k in sorted(counts)}}} "
-              f"-> wrote train={len(train)} val={len(val)} with cols={list(train.columns)}")
-
 if __name__ == "__main__":
     main()
 """).strip()
