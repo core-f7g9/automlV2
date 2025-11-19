@@ -121,6 +121,8 @@ print("Wrote prepare_per_target_splits.py")
 # ============================================================
 # Cell 2b: Write repack script for MME inference
 # ============================================================
+import textwrap, os
+
 repack_script = textwrap.dedent("""
 import argparse
 import glob
@@ -150,17 +152,6 @@ if os.path.isdir(DEPS_DIR):
 FEATURE_COLUMNS = {feature_list}
 TARGET_NAME = "{target_name}"
 
-def _log_env(model_dir):
-    env_keys = [
-        "SAGEMAKER_SUBMIT_DIRECTORY",
-        "SAGEMAKER_PROGRAM",
-        "SAGEMAKER_REGION",
-        "SAGEMAKER_INFERENCE_ENDPOINT_NAME",
-    ]
-    info = {k: os.environ.get(k) for k in env_keys}
-    info["model_dir"] = model_dir
-    print("[context]", json.dumps(info))
-
 def _find_model_file(model_dir):
     for root, _, files in os.walk(model_dir):
         for name in files:
@@ -170,7 +161,6 @@ def _find_model_file(model_dir):
     raise FileNotFoundError("Could not locate serialized model file under {{}}".format(model_dir))
 
 def model_fn(model_dir):
-    _log_env(model_dir)
     model_path = _find_model_file(model_dir)
     return joblib.load(model_path)
 
@@ -308,6 +298,3 @@ with open("repack_for_mme.py", "w") as f:
     f.write(repack_script)
 
 print("Wrote repack_for_mme.py")
-
-
-
