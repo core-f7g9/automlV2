@@ -121,6 +121,8 @@ print("Wrote prepare_per_target_splits.py")
 # ============================================================
 # Cell 2b: Write repack script for MME inference
 # ============================================================
+import textwrap, os
+
 repack_script = textwrap.dedent("""
 import argparse
 import glob
@@ -160,7 +162,7 @@ def _log_env(model_dir):
         "SAGEMAKER_INFERENCE_ENDPOINT_NAME",
         "SAGEMAKER_CONTAINER_LOG_LEVEL",
     ]
-    info = {k: os.environ.get(k) for k in env_keys}
+    info = {{k: os.environ.get(k) for k in env_keys}}
     info["model_dir"] = model_dir
     print("[context]", json.dumps(info))
 
@@ -312,4 +314,5 @@ with open("repack_for_mme.py", "w") as f:
     f.write(repack_script)
 
 print("Wrote repack_for_mme.py")
+
 
