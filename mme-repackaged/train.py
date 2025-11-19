@@ -59,16 +59,22 @@ repack_processor = ScriptProcessor(
     sagemaker_session=p_sess,
 )
 
-# Use a stable serving image for all models to ensure MME compatibility
+# We'll also serve with this sklearn image
 serve_image = img
 
 processing_outputs = []
 for tgt in TARGET_COLS:
     processing_outputs.append(
-        ProcessingOutput(output_name=f"train_{tgt}", source=f"/opt/ml/processing/output/{tgt}/train")
+        ProcessingOutput(
+            output_name=f"train_{tgt}",
+            source=f"/opt/ml/processing/output/{tgt}/train"
+        )
     )
     processing_outputs.append(
-        ProcessingOutput(output_name=f"validation_{tgt}", source=f"/opt/ml/processing/output/{tgt}/validation")
+        ProcessingOutput(
+            output_name=f"validation_{tgt}",
+            source=f"/opt/ml/processing/output/{tgt}/validation"
+        )
     )
 
 split_step = ProcessingStep(
@@ -122,7 +128,10 @@ def build_target_branch(target_name: str):
         total_job_runtime_in_seconds=6*3600
     )
 
-    automl_step = AutoMLStep(name=f"RunAutopilotV1_{target_name}", step_args=automl.fit(inputs=auto_inputs))
+    automl_step = AutoMLStep(
+        name=f"RunAutopilotV1_{target_name}",
+        step_args=automl.fit(inputs=auto_inputs)
+    )
 
     best_data  = automl_step.properties.BestCandidate.InferenceContainers[0].ModelDataUrl
 
@@ -221,7 +230,7 @@ def handler(event, context):
     if not dst_key_prefix.endswith("/"):
         dst_key_prefix += "/"
 
-    # Copy each repacked model into the shared MME prefix with a stable name
+    # Copy each repacked model to a stable key under the MME prefix
     for name, model_data in zip(names, datas):
         dst_key = f"{dst_key_prefix}{name}.tar.gz"
         dst_uri = f"s3://{dst_bucket}/{dst_key}"
@@ -236,11 +245,7 @@ def handler(event, context):
         PrimaryContainer={
             "Image": image,
             "Mode": "MultiModel",
-            "ModelDataUrl": mme_prefix,
-            "Environment": {
-                "SAGEMAKER_PROGRAM": "inference.py",
-                "SAGEMAKER_DEFAULT_INVOCATIONS_ACCEPT": "application/json",
-            },
+            "ModelDataUrl": mme_prefix
         },
         ExecutionRoleArn=exec_role
     )
@@ -291,7 +296,7 @@ deploy_lam = Lambda(
 )
 
 target_names_csv  = ",".join(TARGET_COLS)
-target_images_csv = ",".join([serve_image for _ in TARGET_COLS])  # same image repeated
+target_images_csv = ",".join([serve_image for _ in TARGET_COLS])
 target_datas_csv  = Join(on=",", values=[best_datas[t] for t in TARGET_COLS])
 
 MME_MODELS_PREFIX = f"s3://{BUCKET}/{OUTPUT_PREFIX}/mme/{CLIENT_NAME}/models/"
