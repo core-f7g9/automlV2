@@ -150,6 +150,20 @@ if os.path.isdir(DEPS_DIR):
 FEATURE_COLUMNS = {feature_list}
 TARGET_NAME = "{target_name}"
 
+def _log_env(model_dir):
+    # Helpful context when debugging MME model loads
+    env_keys = [
+        "SAGEMAKER_SUBMIT_DIRECTORY",
+        "SAGEMAKER_PROGRAM",
+        "SAGEMAKER_REGION",
+        "SAGEMAKER_MODEL_SERVER_TIMEOUT",
+        "SAGEMAKER_INFERENCE_ENDPOINT_NAME",
+        "SAGEMAKER_CONTAINER_LOG_LEVEL",
+    ]
+    info = {k: os.environ.get(k) for k in env_keys}
+    info["model_dir"] = model_dir
+    print("[context]", json.dumps(info))
+
 def _find_model_file(model_dir):
     for root, _, files in os.walk(model_dir):
         for name in files:
@@ -159,6 +173,7 @@ def _find_model_file(model_dir):
     raise FileNotFoundError("Could not locate serialized model file under {{}}".format(model_dir))
 
 def model_fn(model_dir):
+    _log_env(model_dir)
     model_path = _find_model_file(model_dir)
     return joblib.load(model_path)
 
@@ -167,6 +182,7 @@ def input_fn(request_body, content_type):
         raise ValueError("Unsupported content type: {{}}".format(content_type))
     if isinstance(request_body, (bytes, bytearray)):
         request_body = request_body.decode("utf-8")
+    print("[input_fn] content_type:", content_type)
     reader = csv.reader(io.StringIO(request_body))
     row = next(reader)
     expected = len(FEATURE_COLUMNS)
@@ -188,7 +204,7 @@ def input_fn(request_body, content_type):
 def predict_fn(input_data, model):
     result = {{"target": TARGET_NAME}}
     preds = model.predict(input_data)
-    result["label"] = preds[0]
+    result["label"] = str(preds[0])
     if hasattr(model, "predict_proba"):
         try:
             probs = model.predict_proba(input_data)[0]
@@ -241,12 +257,12 @@ def main():
         with tarfile.open(src_tar, "r:gz") as tar:
             tar.extractall(work_dir)
 
-        # Write inference.py at the root of the model directory
+        # Write inference.py at the ROOT of the model directory
         script_path = os.path.join(work_dir, args.inference_filename)
         with open(script_path, "w") as f:
             f.write(script_text)
 
-        # Write requirements.txt listing *only* the libs we need
+        # Write requirements.txt listing libs potentially needed by the model
         req_path = os.path.join(work_dir, "requirements.txt")
         reqs = "\\n".join([
             "pandas",
@@ -271,7 +287,7 @@ def main():
             "-t", deps_dir
         ])
 
-        # Tell SageMaker which program to use
+        # Tell SageMaker which program to use (root-level inference.py)
         with open(os.path.join(work_dir, ".sagemaker-inference.json"), "w") as f:
             json.dump({"program": args.inference_filename}, f)
 
@@ -296,3 +312,4 @@ with open("repack_for_mme.py", "w") as f:
     f.write(repack_script)
 
 print("Wrote repack_for_mme.py")
+

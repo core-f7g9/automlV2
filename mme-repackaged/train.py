@@ -59,13 +59,17 @@ repack_processor = ScriptProcessor(
     sagemaker_session=p_sess,
 )
 
-# Use a stable serving image for all models to ensure MME compatibility and required libs (boto3/botocore)
+# Use a stable serving image for all models to ensure MME compatibility
 serve_image = img
 
 processing_outputs = []
 for tgt in TARGET_COLS:
-    processing_outputs.append(ProcessingOutput(output_name=f"train_{tgt}",      source=f"/opt/ml/processing/output/{tgt}/train"))
-    processing_outputs.append(ProcessingOutput(output_name=f"validation_{tgt}", source=f"/opt/ml/processing/output/{tgt}/validation"))
+    processing_outputs.append(
+        ProcessingOutput(output_name=f"train_{tgt}", source=f"/opt/ml/processing/output/{tgt}/train")
+    )
+    processing_outputs.append(
+        ProcessingOutput(output_name=f"validation_{tgt}", source=f"/opt/ml/processing/output/{tgt}/validation")
+    )
 
 split_step = ProcessingStep(
     name="PreparePerTargetSplits",
@@ -159,9 +163,9 @@ def build_target_branch(target_name: str):
     register_step = RegisterModel(
         name=f"RegisterBestModel_{target_name}",
         model=model_to_register,
-        content_types=["text/csv","application/json"],
+        content_types=["text/csv", "application/json"],
         response_types=["application/json"],
-        inference_instances=["ml.m5.large","ml.c5.large"],
+        inference_instances=["ml.m5.large", "ml.c5.large"],
         transform_instances=["ml.m5.large"],
         model_package_group_name=f"{PROJECT_NAME}-pkg-group-{target_name}",
         approval_status="Approved",
@@ -217,6 +221,7 @@ def handler(event, context):
     if not dst_key_prefix.endswith("/"):
         dst_key_prefix += "/"
 
+    # Copy each repacked model into the shared MME prefix with a stable name
     for name, model_data in zip(names, datas):
         dst_key = f"{dst_key_prefix}{name}.tar.gz"
         dst_uri = f"s3://{dst_bucket}/{dst_key}"
@@ -231,7 +236,11 @@ def handler(event, context):
         PrimaryContainer={
             "Image": image,
             "Mode": "MultiModel",
-            "ModelDataUrl": mme_prefix
+            "ModelDataUrl": mme_prefix,
+            "Environment": {
+                "SAGEMAKER_PROGRAM": "inference.py",
+                "SAGEMAKER_DEFAULT_INVOCATIONS_ACCEPT": "application/json",
+            },
         },
         ExecutionRoleArn=exec_role
     )
@@ -282,7 +291,7 @@ deploy_lam = Lambda(
 )
 
 target_names_csv  = ",".join(TARGET_COLS)
-target_images_csv = ",".join([serve_image for _ in TARGET_COLS])  # literal CSV of one shared image
+target_images_csv = ",".join([serve_image for _ in TARGET_COLS])  # same image repeated
 target_datas_csv  = Join(on=",", values=[best_datas[t] for t in TARGET_COLS])
 
 MME_MODELS_PREFIX = f"s3://{BUCKET}/{OUTPUT_PREFIX}/mme/{CLIENT_NAME}/models/"
