@@ -143,6 +143,27 @@ import json
 import joblib
 import numpy as np
 import pandas as pd
+from typing import Tuple
+
+try:
+    import xgboost as xgb
+except Exception:
+    xgb = None
+
+try:
+    from catboost import CatBoostClassifier, CatBoostRegressor
+except Exception:
+    CatBoostClassifier = CatBoostRegressor = None
+
+try:
+    import lightgbm as lgb
+except Exception:
+    lgb = None
+
+try:
+    from autogluon.tabular import TabularPredictor
+except Exception:
+    TabularPredictor = None
 
 BASE_DIR = os.path.dirname(__file__)
 DEPS_DIR = os.path.join(BASE_DIR, "dependencies")
@@ -152,17 +173,70 @@ if os.path.isdir(DEPS_DIR):
 FEATURE_COLUMNS = {feature_list}
 TARGET_NAME = "{target_name}"
 
-def _find_model_file(model_dir):
+MODEL_PRIORITY = (
+    ("pipeline.pkl", "joblib"),
+    ("model.pkl", "joblib"),
+    ("model.joblib", "joblib"),
+    ("model.pickle", "joblib"),
+    ("model.bin", "joblib"),
+    ("model.json", "xgboost"),
+    ("xgboost-model", "xgboost"),
+    ("model.cbm", "catboost"),
+)
+
+def _flatten_model_paths(model_dir):
+    discovered = []
     for root, _, files in os.walk(model_dir):
         for name in files:
-            lower = name.lower()
-            if lower.endswith((".pkl", ".pickle", ".joblib", ".model")):
-                return os.path.join(root, name)
+            discovered.append((os.path.join(root, name), name.lower()))
+    return discovered
+
+def _find_model_file(model_dir) -> Tuple[str, str]:
+    discovered = _flatten_model_paths(model_dir)
+    for candidate, kind in MODEL_PRIORITY:
+        for path, lower in discovered:
+            if lower == candidate or lower.endswith(candidate):
+                return path, kind
+
+    for path, lower in discovered:
+        if lower.endswith((".pkl", ".pickle", ".joblib")):
+            return path, "joblib"
+        if lower == "xgboost-model":
+            return path, "xgboost"
+        if lower.endswith(".cbm"):
+            return path, "catboost"
     raise FileNotFoundError("Could not locate serialized model file under {{}}".format(model_dir))
 
+def _load_model(path, kind_hint):
+    lower = os.path.basename(path).lower()
+    if kind_hint == "xgboost" or lower in ("xgboost-model", "model.json", "model.bin"):
+        if xgb is None:
+            raise ImportError("xgboost is required to load the model but is not available in this container")
+        booster = xgb.Booster()
+        booster.load_model(path)
+        return "xgboost_booster", booster
+
+    if kind_hint == "catboost" or lower.endswith(".cbm"):
+        if CatBoostClassifier is None:
+            raise ImportError("catboost is required to load the model but is not available in this container")
+        try:
+            model = CatBoostClassifier()
+            model.load_model(path)
+            return "catboost_classifier", model
+        except Exception:
+            model = CatBoostRegressor()
+            model.load_model(path)
+            return "catboost_regressor", model
+
+    obj = joblib.load(path)
+    if TabularPredictor is not None and isinstance(obj, TabularPredictor):
+        return "autogluon", obj
+    return "joblib", obj
+
 def model_fn(model_dir):
-    model_path = _find_model_file(model_dir)
-    return joblib.load(model_path)
+    model_path, kind = _find_model_file(model_dir)
+    kind, model = _load_model(model_path, kind)
+    return {{"kind": kind, "model": model}}
 
 def input_fn(request_body, content_type):
     if content_type != "text/csv":
@@ -188,6 +262,36 @@ def input_fn(request_body, content_type):
     return frame
 
 def predict_fn(input_data, model):
+    kind = model.get("kind")
+    model = model.get("model")
+
+    if kind == "autogluon":
+        preds = model.predict(input_data)
+        label = preds.iloc[0] if hasattr(preds, "iloc") else preds[0]
+        result = {{"target": TARGET_NAME, "label": label}}
+        if hasattr(model, "predict_proba"):
+            try:
+                prob_df = model.predict_proba(input_data)
+                probs = prob_df.iloc[0].to_dict() if hasattr(prob_df, "iloc") else prob_df[0]
+                result["probabilities"] = {{str(k): float(v) for k, v in probs.items()}}
+            except Exception:
+                pass
+        return result
+
+    if kind == "xgboost_booster":
+        if xgb is None:
+            raise ImportError("xgboost is required for inference but is not available in this container")
+        non_numeric = [c for c in input_data.columns if not np.issubdtype(input_data[c].dtype, np.number)]
+        if non_numeric:
+            raise ValueError(f"Loaded a bare XGBoost booster but input has non-numeric columns: {{non_numeric}}. Re-run training to ensure a pipeline.pkl exists.")
+        dmat = xgb.DMatrix(input_data)
+        raw = np.array(model.predict(dmat))
+        if raw.ndim > 1 and raw.shape[1] > 1:
+            label_idx = int(np.argmax(raw[0]))
+            probs = {{str(i): float(v) for i, v in enumerate(raw[0].tolist())}}
+            return {{"target": TARGET_NAME, "label": label_idx, "probabilities": probs}}
+        return {{"target": TARGET_NAME, "label": float(raw[0])}}
+
     result = {{"target": TARGET_NAME}}
     preds = model.predict(input_data)
     result["label"] = preds[0]
@@ -228,6 +332,7 @@ def main():
     parser.add_argument("--target_name", type=str, required=True)
     parser.add_argument("--feature_list_csv", type=str, required=True)
     parser.add_argument("--inference_filename", type=str, default="inference.py")
+    parser.add_argument("--vendor_dependencies", action="store_true", help="pip install common ML deps into the artifact")
     args = parser.parse_args()
 
     features = [c.strip() for c in args.feature_list_csv.split(",") if c.strip()]
@@ -248,30 +353,31 @@ def main():
         with open(script_path, "w") as f:
             f.write(script_text)
 
-        # requirements.txt with only what we actually need
-        req_path = os.path.join(work_dir, "requirements.txt")
-        reqs = "\\n".join([
-            "pandas",
-            "numpy",
-            "joblib",
-            "scikit-learn",
-            "xgboost",
-            "lightgbm",
-            "catboost",
-        ]) + "\\n"
-        with open(req_path, "w") as f:
-            f.write(reqs)
+        if args.vendor_dependencies:
+            # requirements.txt with only what we actually need
+            req_path = os.path.join(work_dir, "requirements.txt")
+            reqs = "\\n".join([
+                "pandas",
+                "numpy",
+                "joblib",
+                "scikit-learn",
+                "xgboost",
+                "lightgbm",
+                "catboost",
+            ]) + "\\n"
+            with open(req_path, "w") as f:
+                f.write(reqs)
 
-        # Vendor dependencies into 'dependencies' so container doesn't need internet
-        deps_dir = os.path.join(work_dir, "dependencies")
-        os.makedirs(deps_dir, exist_ok=True)
-        subprocess.check_call([
-            sys.executable,
-            "-m", "pip", "install",
-            "--no-cache-dir",
-            "-r", req_path,
-            "-t", deps_dir
-        ])
+            # Vendor dependencies into 'dependencies' so container doesn't need internet
+            deps_dir = os.path.join(work_dir, "dependencies")
+            os.makedirs(deps_dir, exist_ok=True)
+            subprocess.check_call([
+                sys.executable,
+                "-m", "pip", "install",
+                "--no-cache-dir",
+                "-r", req_path,
+                "-t", deps_dir
+            ])
 
         # Let the runtime know our entrypoint; path is relative to this root
         with open(os.path.join(work_dir, ".sagemaker-inference.json"), "w") as f:

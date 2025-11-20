@@ -4,6 +4,7 @@
 # ==========================================================
 import time, json
 import boto3, sagemaker
+from setup import *  # brings in BUCKET, INPUT_S3CSV, TARGET_COLS, INPUT_FEATURES, etc.
 from sagemaker.workflow.pipeline import Pipeline
 from sagemaker.workflow.parameters import (
     ParameterString, ParameterFloat, ParameterInteger, ParameterBoolean
@@ -58,9 +59,6 @@ repack_processor = ScriptProcessor(
     command=["python3"],
     sagemaker_session=p_sess,
 )
-
-# We'll also serve with this sklearn image
-serve_image = img
 
 processing_outputs = []
 for tgt in TARGET_COLS:
@@ -133,6 +131,7 @@ def build_target_branch(target_name: str):
         step_args=automl.fit(inputs=auto_inputs)
     )
 
+    best_image = automl_step.properties.BestCandidate.InferenceContainers[0].Image
     best_data  = automl_step.properties.BestCandidate.InferenceContainers[0].ModelDataUrl
 
     repack_step = ProcessingStep(
@@ -163,7 +162,7 @@ def build_target_branch(target_name: str):
     repacked_model_s3 = Join(on="", values=[repacked_prefix, "/model.tar.gz"])
 
     model_to_register = Model(
-        image_uri=serve_image,
+        image_uri=best_image,
         model_data=repacked_model_s3,
         role=role_arn,
         sagemaker_session=p_sess,
@@ -181,7 +180,7 @@ def build_target_branch(target_name: str):
         description=f"Best model for target {target_name} (cols: {INPUT_FEATURES + [target_name]})",
     )
 
-    return automl_step, repack_step, register_step, serve_image, repacked_model_s3
+    return automl_step, repack_step, register_step, best_image, repacked_model_s3
 
 branches = []
 best_images = {}
@@ -221,7 +220,7 @@ def handler(event, context):
         raise ValueError("Targets length mismatch among names/images/model_datas")
 
     if len(set(images)) != 1:
-        raise ValueError(f"MME requires a single container image. Found: {list(set(images))}")
+        raise ValueError(f"MME requires a single container image. Found: {list(set(images))}. Ensure all targets share the same AutoML inference container (try ENSEMBLING mode) before deploying.")
 
     image = images[0]
 
@@ -296,7 +295,7 @@ deploy_lam = Lambda(
 )
 
 target_names_csv  = ",".join(TARGET_COLS)
-target_images_csv = ",".join([serve_image for _ in TARGET_COLS])
+target_images_csv = Join(on=",", values=[best_images[t].to_string() for t in TARGET_COLS])
 target_datas_csv  = Join(on=",", values=[best_datas[t] for t in TARGET_COLS])
 
 MME_MODELS_PREFIX = f"s3://{BUCKET}/{OUTPUT_PREFIX}/mme/{CLIENT_NAME}/models/"
