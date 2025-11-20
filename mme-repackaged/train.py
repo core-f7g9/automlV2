@@ -2,9 +2,42 @@
 # ==========================================================
 # Cell 3: Per-target Autopilot V1 + MME deployment (1 instance)
 # ==========================================================
-import time, json
+import time, json, os
 import boto3, sagemaker
-from setup import *  # brings in BUCKET, INPUT_S3CSV, TARGET_COLS, INPUT_FEATURES, etc.
+
+# ---- Config (edit these in your notebook cell 1, or override via env vars) ----
+region = boto3.Session().region_name
+
+def _default_role():
+    try:
+        return sagemaker.get_execution_role()
+    except Exception:
+        return os.getenv("SAGEMAKER_ROLE_ARN") or os.getenv("ROLE_ARN")
+
+def _default_bucket():
+    try:
+        return sagemaker.Session().default_bucket()
+    except Exception:
+        return os.getenv("SAGEMAKER_DEFAULT_BUCKET")
+
+CLIENT_NAME = globals().get("CLIENT_NAME", os.getenv("CLIENT_NAME", "client1"))
+PROJECT_NAME = globals().get("PROJECT_NAME", os.getenv("PROJECT_NAME", f"{CLIENT_NAME}-autopilot-v1"))
+OUTPUT_PREFIX = globals().get("OUTPUT_PREFIX", os.getenv("OUTPUT_PREFIX", "mlops"))
+BUCKET = globals().get("BUCKET", os.getenv("BUCKET", _default_bucket()))
+INPUT_S3CSV = globals().get("INPUT_S3CSV", os.getenv("INPUT_S3CSV", f"s3://{BUCKET}/input/data.csv"))
+TARGET_COLS = globals().get("TARGET_COLS", ["DepartmentCode", "AccountCode", "SubAccountCode", "LocationCode"])
+INPUT_FEATURES = globals().get("INPUT_FEATURES", ["VendorName", "LineDescription", "ClubNumber"])
+VAL_FRAC_DEFAULT = globals().get("VAL_FRAC_DEFAULT", 0.20)
+MIN_SUPPORT_DEFAULT = globals().get("MIN_SUPPORT_DEFAULT", 5)
+RARE_TRAIN_ONLY_DEFAULT = globals().get("RARE_TRAIN_ONLY_DEFAULT", True)
+CLIENT_NAME = globals().get("CLIENT_NAME", CLIENT_NAME)
+role_arn = globals().get("role_arn", os.getenv("role_arn") or _default_role())
+
+if not BUCKET:
+    raise RuntimeError("BUCKET is not set. Set BUCKET or run this in SageMaker Studio so default_bucket() is available.")
+if not role_arn:
+    raise RuntimeError("role_arn is not set. Set role_arn (or env ROLE_ARN/SAGEMAKER_ROLE_ARN) before running.")
+
 from sagemaker.workflow.pipeline import Pipeline
 from sagemaker.workflow.parameters import (
     ParameterString, ParameterFloat, ParameterInteger, ParameterBoolean
@@ -25,7 +58,6 @@ from sagemaker.workflow.conditions import ConditionEquals
 from sagemaker.workflow.condition_step import ConditionStep
 
 p_sess = PipelineSession()
-region = boto3.Session().region_name
 
 bucket_param       = ParameterString("Bucket",       default_value=BUCKET)
 input_s3_csv_param = ParameterString("InputS3CSV",   default_value=INPUT_S3CSV)
