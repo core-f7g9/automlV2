@@ -393,10 +393,10 @@ from sagemaker.workflow.properties import PropertyFile
 
 p_sess = PipelineSession()
 
-bucket_param        = ParameterString("Bucket",       default_value=BUCKET)
-input_csv_param     = ParameterString("InputS3CSV",   default_value=INPUT_S3CSV)
-EndpointNameParam   = ParameterString("EndpointName", default_value=f"{PROJECT_NAME}-mme")
-InstanceTypeParam   = ParameterString("InstanceType", default_value="ml.m5.large")
+bucket_param         = ParameterString("Bucket",       default_value=BUCKET)
+input_csv_param      = ParameterString("InputS3CSV",   default_value=INPUT_S3CSV)
+EndpointNameParam    = ParameterString("EndpointName", default_value=f"{PROJECT_NAME}-mme")
+InstanceTypeParam    = ParameterString("InstanceType", default_value="ml.m5.large")
 InitialInstanceCount = ParameterInteger("InitialInstanceCount", default_value=1)
 
 XGB_IMAGE = sagemaker.image_uris.retrieve("xgboost", region, version="1.3-1")
@@ -411,30 +411,22 @@ split_processor = ScriptProcessor(
     sagemaker_session=p_sess,
 )
 
-processing_outputs = []
+# ✅ Only ONE ProcessingOutput: the root of /opt/ml/processing/output
+processing_outputs = [
+    ProcessingOutput(
+        output_name="data",
+        source="/opt/ml/processing/output",
+    )
+]
+
+# Per-target metadata, but all under the same output_name="data"
 meta_property_files = []
-
 for tgt in TARGET_COLS:
-    processing_outputs.extend([
-        ProcessingOutput(
-            output_name=f"train_{tgt}",
-            source=f"/opt/ml/processing/output/{tgt}/train"
-        ),
-        ProcessingOutput(
-            output_name=f"validation_{tgt}",
-            source=f"/opt/ml/processing/output/{tgt}/validation"
-        ),
-        ProcessingOutput(
-            output_name=f"meta_{tgt}",
-            source=f"/opt/ml/processing/output/{tgt}/meta"
-        ),
-    ])
-
     meta_property_files.append(
         PropertyFile(
             name=f"{tgt}Meta",
-            output_name=f"meta_{tgt}",
-            path="class_count.json",
+            output_name="data",
+            path=f"{tgt}/meta/class_count.json",  # nested path inside /output
         )
     )
 
@@ -444,7 +436,7 @@ split_step = ProcessingStep(
     inputs=[
         ProcessingInput(
             source=input_csv_param,
-            destination="/opt/ml/processing/input"
+            destination="/opt/ml/processing/input",
         )
     ],
     outputs=processing_outputs,
@@ -460,17 +452,17 @@ split_step = ProcessingStep(
     property_files=meta_property_files,
 )
 
+# S3 root where all processed data lives
+data_root_s3 = split_step.properties.ProcessingOutputConfig.Outputs["data"].S3Output.S3Uri
+
 # --- Per-target training steps & model artifact collection ---
 train_steps = []
 model_s3_uris = {}
 
 for tgt in TARGET_COLS:
-    train_s3 = split_step.properties.ProcessingOutputConfig.Outputs[
-        f"train_{tgt}"
-    ].S3Output.S3Uri
-    val_s3 = split_step.properties.ProcessingOutputConfig.Outputs[
-        f"validation_{tgt}"
-    ].S3Output.S3Uri
+    # Build per-target train/val S3 prefixes using Join (no Python string concatenation)
+    train_s3 = Join(on="", values=[data_root_s3, tgt, "/train"])
+    val_s3   = Join(on="", values=[data_root_s3, tgt, "/validation"])
 
     # dynamic num_class from preprocessing metadata
     meta_file = next(pf for pf in meta_property_files if pf.name == f"{tgt}Meta")
@@ -517,19 +509,16 @@ deploy_lam = Lambda(
     handler="deploy_xgb_mme.handler",
     timeout=600,
     memory_size=512,
-    environment={                    
+    environment={
         "Variables": {
-            "EXEC_ROLE_ARN": role
+            "EXEC_ROLE_ARN": role  # SageMaker model execution role
         }
     },
 )
 
-
-target_names_csv = ",".join(TARGET_COLS)
-target_model_uris = [model_s3_uris[t] for t in TARGET_COLS]
-
-# Join pipeline variables into a CSV string
-target_datas_csv = Join(on=",", values=target_model_uris)
+target_names_csv   = ",".join(TARGET_COLS)
+target_model_uris  = [model_s3_uris[t] for t in TARGET_COLS]
+target_datas_csv   = Join(on=",", values=target_model_uris)
 
 deploy_step = LambdaStep(
     name="DeployMME",
@@ -548,7 +537,6 @@ deploy_step = LambdaStep(
     ],
 )
 
-# --- Pipeline definition & execution ---
 pipeline = Pipeline(
     name=f"{PROJECT_NAME}-pipeline",
     parameters=[
@@ -565,4 +553,3 @@ pipeline = Pipeline(
 pipeline.upsert(role_arn=role)
 execution = pipeline.start()
 print("Pipeline execution ARN:", execution.arn)
-
