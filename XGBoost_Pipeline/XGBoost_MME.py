@@ -517,8 +517,13 @@ deploy_lam = Lambda(
     handler="deploy_xgb_mme.handler",
     timeout=600,
     memory_size=512,
-    environment={"EXEC_ROLE_ARN": role},  # SageMaker model execution role
+    environment={                    
+        "Variables": {
+            "EXEC_ROLE_ARN": role
+        }
+    },
 )
+
 
 target_names_csv = ",".join(TARGET_COLS)
 target_model_uris = [model_s3_uris[t] for t in TARGET_COLS]
