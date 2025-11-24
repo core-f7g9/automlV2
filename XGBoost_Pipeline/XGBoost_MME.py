@@ -57,7 +57,7 @@ print("Project:", PROJECT_NAME, "| Output prefix:", OUTPUT_PREFIX)
 #   - deploy_xgb_mme.py
 # =========================
 
-# --------- prepare_per_target_splits.py (preprocess for XGBoost) ----------
+# --------- prepare_per_target_splits.py ----------
 preprocess_script = r"""
 import argparse, os, glob, json
 import pandas as pd
@@ -68,7 +68,6 @@ def find_input_csv(mounted_dir):
     candidates = glob.glob(os.path.join(mounted_dir, "*.csv"))
     if not candidates:
         raise FileNotFoundError(f"No CSV found under {mounted_dir}")
-    # If multiple, just take first; adjust if you need a specific one
     return candidates[0]
 
 
@@ -84,11 +83,9 @@ def encode_features(df: pd.DataFrame, input_feats):
     for col in input_feats:
         col_data = df_feats[col]
         if pd.api.types.is_numeric_dtype(col_data):
-            # already numeric
             continue
 
-        # Convert text / categorical to integer codes
-        df_feats[col] = col_data.astype('category').cat.codes.astype('int32')
+        df_feats[col] = col_data.astype("category").cat.codes.astype("int32")
 
     return df_feats
 
@@ -99,25 +96,20 @@ def per_target_split(full_df, enc_feats, target_col, input_feats, val_frac=0.2):
     enc_feats : numeric feature dataframe aligned by index with full_df
     target_col: name of target column
     '''
-    # Drop rows with missing target
     df_t = full_df[~full_df[target_col].isna()].copy()
 
-    # Build label encoding 0..num_class-1
     classes = sorted(df_t[target_col].astype(str).unique())
     class_to_idx = {c: i for i, c in enumerate(classes)}
 
-    df_t['label'] = df_t[target_col].astype(str).map(class_to_idx).astype('int32')
+    df_t["label"] = df_t[target_col].astype(str).map(class_to_idx).astype("int32")
 
-    # Align encoded features with this subset
     feat_t = enc_feats.loc[df_t.index].copy()
 
-    # Final matrix: [label] + encoded features
-    df_all = pd.concat([df_t['label'], feat_t], axis=1)
+    df_all = pd.concat([df_t["label"], feat_t], axis=1)
 
-    # Stratified split by label
     val_idx = []
-    for lbl in sorted(df_all['label'].unique()):
-        g = df_all[df_all['label'] == lbl]
+    for lbl in sorted(df_all["label"].unique()):
+        g = df_all[df_all["label"] == lbl]
         n_val = max(1, int(len(g) * val_frac))
         val_idx.extend(g.sample(n=n_val, random_state=42).index)
 
@@ -130,34 +122,31 @@ def per_target_split(full_df, enc_feats, target_col, input_feats, val_frac=0.2):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--targets_csv', required=True)
-    p.add_argument('--input_features_csv', required=True)
-    p.add_argument('--val_frac', type=float, default=0.2)
-    p.add_argument('--mounted_input_dir', default='/opt/ml/processing/input')
-    p.add_argument('--output_dir', default='/opt/ml/processing/output')
+    p.add_argument("--targets_csv", required=True)
+    p.add_argument("--input_features_csv", required=True)
+    p.add_argument("--val_frac", type=float, default=0.2)
+    p.add_argument("--mounted_input_dir", default="/opt/ml/processing/input")
+    p.add_argument("--output_dir", default="/opt/ml/processing/output")
     args = p.parse_args()
 
     input_file = find_input_csv(args.mounted_input_dir)
-    print(f'Using input CSV: {input_file}')
-    # Your dataset has header + text + numeric
+    print(f"Using input CSV: {input_file}")
     df = pd.read_csv(input_file)
 
-    targets = [c.strip() for c in args.targets_csv.split(',') if c.strip()]
-    input_feats = [c.strip() for c in args.input_features_csv.split(',') if c.strip()]
+    targets = [c.strip() for c in args.targets_csv.split(",") if c.strip()]
+    input_feats = [c.strip() for c in args.input_features_csv.split(",") if c.strip()]
 
-    # Basic sanity checks
     missing_feats = [c for c in input_feats if c not in df.columns]
     missing_tgts = [c for c in targets if c not in df.columns]
     if missing_feats:
-        raise ValueError(f'Missing feature columns in CSV: {missing_feats}')
+        raise ValueError(f"Missing feature columns in CSV: {missing_feats}")
     if missing_tgts:
-        raise ValueError(f'Missing target columns in CSV: {missing_tgts}')
+        raise ValueError(f"Missing target columns in CSV: {missing_tgts}")
 
-    # Encode ALL features once, globally, so encoding is consistent across targets
     enc_feats = encode_features(df, input_feats)
 
     for tgt in targets:
-        print(f'Processing target: {tgt}')
+        print(f"Processing target: {tgt}")
 
         train_df, val_df, num_class, class_to_idx = per_target_split(
             full_df=df,
@@ -167,40 +156,39 @@ def main():
             val_frac=args.val_frac,
         )
 
-        out_tr = os.path.join(args.output_dir, tgt, 'train')
-        out_va = os.path.join(args.output_dir, tgt, 'validation')
-        out_meta = os.path.join(args.output_dir, tgt, 'meta')
+        out_tr = os.path.join(args.output_dir, tgt, "train")
+        out_va = os.path.join(args.output_dir, tgt, "validation")
+        out_meta = os.path.join(args.output_dir, tgt, "meta")
 
         os.makedirs(out_tr, exist_ok=True)
         os.makedirs(out_va, exist_ok=True)
         os.makedirs(out_meta, exist_ok=True)
 
-        # IMPORTANT: no header, label is first column
-        train_path = os.path.join(out_tr, 'train.csv')
-        val_path = os.path.join(out_va, 'validation.csv')
+        train_path = os.path.join(out_tr, "train.csv")
+        val_path = os.path.join(out_va, "validation.csv")
 
         train_df.to_csv(train_path, index=False, header=False)
         val_df.to_csv(val_path, index=False, header=False)
 
-        meta_path = os.path.join(out_meta, 'class_count.json')
-        with open(meta_path, 'w') as f:
+        meta_path = os.path.join(out_meta, "class_count.json")
+        with open(meta_path, "w") as f:
             json.dump(
                 {
-                    'num_class': int(num_class),
-                    'class_to_idx': class_to_idx,
+                    "num_class": int(num_class),
+                    "class_to_idx": class_to_idx,
                 },
                 f,
             )
 
         print(
-            f'Target {tgt}: wrote '
-            f'train -> {train_path} (rows={len(train_df)}), '
-            f'val -> {val_path} (rows={len(val_df)}), '
-            f'num_class={num_class}'
+            f"Target {tgt}: wrote "
+            f"train -> {train_path} (rows={len(train_df)}), "
+            f"val -> {val_path} (rows={len(val_df)}), "
+            f"num_class={num_class}"
         )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
 """
 
@@ -209,7 +197,7 @@ with open("prepare_per_target_splits.py", "w") as f:
 print("Wrote prepare_per_target_splits.py")
 
 
-# --------- deploy_xgb_mme.py (Lambda for multi-model endpoint deploy) ----------
+# --------- deploy_xgb_mme.py ----------
 deploy_script = r"""
 import os
 import time
@@ -251,7 +239,6 @@ def handler(event, context):
     target_models_csv = event['TargetModelDatasCSV']
     image_uri = event['XGBoostImage']
 
-    # Execution role for the SageMaker model
     exec_role_arn = os.environ.get('EXEC_ROLE_ARN')
     if not exec_role_arn:
         raise RuntimeError('EXEC_ROLE_ARN environment variable not set')
@@ -268,16 +255,13 @@ def handler(event, context):
             f'and model URIs ({len(model_uris)})'
         )
 
-    # Parse destination prefix for the MME models
     dest_bucket, dest_prefix = _parse_s3_uri(models_prefix_uri)
     dest_prefix = dest_prefix.rstrip('/') + '/'
 
     copied_models = []
 
-    # Copy each model artifact into the MME prefix
     for tgt, src_uri in zip(target_names, model_uris):
         src_bucket, src_key = _parse_s3_uri(src_uri)
-        # Use a stable filename per target
         dest_key = f'{dest_prefix}{tgt}.tar.gz'
 
         print(f"Copying model for target '{tgt}' from {src_uri} to s3://{dest_bucket}/{dest_key}")
@@ -293,16 +277,14 @@ def handler(event, context):
             }
         )
 
-    # Create or update the SageMaker multi-model endpoint
     timestamp = time.strftime('%Y%m%d-%H%M%S')
     model_name = f'{endpoint_name}-model-{timestamp}'
     endpoint_config_name = f'{endpoint_name}-config-{timestamp}'
 
-    # Multi-model container definition
     container = {
         'Image': image_uri,
         'Mode': 'MultiModel',
-        'ModelDataUrl': models_prefix_uri.rstrip('/'),  # prefix only
+        'ModelDataUrl': models_prefix_uri.rstrip('/'),
         'Environment': {},
     }
 
@@ -330,7 +312,6 @@ def handler(event, context):
         ],
     )
 
-    # Check if endpoint exists
     endpoint_exists = False
     try:
         sm.describe_endpoint(EndpointName=endpoint_name)
@@ -411,7 +392,7 @@ split_processor = ScriptProcessor(
     sagemaker_session=p_sess,
 )
 
-# ✅ Only ONE ProcessingOutput: the root of /opt/ml/processing/output
+# Single output: root of all processed data
 processing_outputs = [
     ProcessingOutput(
         output_name="data",
@@ -419,14 +400,13 @@ processing_outputs = [
     )
 ]
 
-# Per-target metadata, but all under the same output_name="data"
 meta_property_files = []
 for tgt in TARGET_COLS:
     meta_property_files.append(
         PropertyFile(
             name=f"{tgt}Meta",
             output_name="data",
-            path=f"{tgt}/meta/class_count.json",  # nested path inside /output
+            path=f"{tgt}/meta/class_count.json",
         )
     )
 
@@ -452,19 +432,17 @@ split_step = ProcessingStep(
     property_files=meta_property_files,
 )
 
-# S3 root where all processed data lives
 data_root_s3 = split_step.properties.ProcessingOutputConfig.Outputs["data"].S3Output.S3Uri
 
-# --- Per-target training steps & model artifact collection ---
+# --- Per-target training ---
 train_steps = []
 model_s3_uris = {}
 
 for tgt in TARGET_COLS:
-    # Build per-target train/val S3 prefixes using Join (no Python string concatenation)
-    train_s3 = Join(on="", values=[data_root_s3, tgt, "/train"])
-    val_s3   = Join(on="", values=[data_root_s3, tgt, "/validation"])
+    # S3 paths where preprocess wrote train/validation
+    train_s3 = Join(on="", values=[data_root_s3, f"/{tgt}/train"])
+    val_s3   = Join(on="", values=[data_root_s3, f"/{tgt}/validation"])
 
-    # dynamic num_class from preprocessing metadata
     meta_file = next(pf for pf in meta_property_files if pf.name == f"{tgt}Meta")
     num_class = JsonGet(
         step_name=split_step.name,
@@ -497,28 +475,27 @@ for tgt in TARGET_COLS:
     model_s3_uris[tgt] = train_step.properties.ModelArtifacts.S3ModelArtifacts
     train_steps.append(train_step)
 
-# --- Deployment via Lambda to Multi-Model Endpoint ---
+# --- Deployment via Lambda (MME) ---
 MME_MODELS_PREFIX = f"s3://{BUCKET}/{OUTPUT_PREFIX}/mme/{CLIENT_NAME}/models/"
-
 deploy_lambda_name = f"{PROJECT_NAME}-deploy-mme"
 
 deploy_lam = Lambda(
     function_name=deploy_lambda_name,
-    execution_role_arn=role,          # Lambda's execution role
+    execution_role_arn=role,
     script="deploy_xgb_mme.py",
     handler="deploy_xgb_mme.handler",
     timeout=600,
     memory_size=512,
     environment={
         "Variables": {
-            "EXEC_ROLE_ARN": role  # SageMaker model execution role
+            "EXEC_ROLE_ARN": role
         }
     },
 )
 
-target_names_csv   = ",".join(TARGET_COLS)
-target_model_uris  = [model_s3_uris[t] for t in TARGET_COLS]
-target_datas_csv   = Join(on=",", values=target_model_uris)
+target_names_csv  = ",".join(TARGET_COLS)
+target_model_uris = [model_s3_uris[t] for t in TARGET_COLS]
+target_datas_csv  = Join(on=",", values=target_model_uris)
 
 deploy_step = LambdaStep(
     name="DeployMME",
