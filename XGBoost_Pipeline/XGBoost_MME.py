@@ -135,7 +135,8 @@ from sagemaker.inputs import TrainingInput
 from sagemaker.estimator import Estimator
 from sagemaker.workflow.lambda_step import LambdaStep, LambdaOutput, LambdaOutputTypeEnum
 from sagemaker.lambda_helper import Lambda
-from sagemaker.workflow.functions import Join
+from sagemaker.workflow.functions import Join, JsonGet
+from sagemaker.workflow.properties import PropertyFile
 
 p_sess = PipelineSession()
 
@@ -160,6 +161,7 @@ split_processor = ScriptProcessor(
 processing_outputs = []
 branches = []
 model_s3_uris = {}
+meta_property_files = []
 
 for tgt in TARGET_COLS:
     processing_outputs.extend([
@@ -167,6 +169,13 @@ for tgt in TARGET_COLS:
         ProcessingOutput(output_name=f"validation_{tgt}", source=f"/opt/ml/processing/output/{tgt}/validation"),
         ProcessingOutput(output_name=f"meta_{tgt}", source=f"/opt/ml/processing/output/{tgt}/meta")
     ])
+    meta_property_files.append(
+        PropertyFile(
+            name=f"{tgt}Meta",
+            output_name=f"meta_{tgt}",
+            path="class_count.json",
+        )
+    )
 
 split_step = ProcessingStep(
     name="PreparePerTargetSplits",
@@ -181,22 +190,18 @@ split_step = ProcessingStep(
         "--mounted_input_dir", "/opt/ml/processing/input",
         "--output_dir", "/opt/ml/processing/output"
     ],
-    cache_config=CacheConfig(enable_caching=True, expire_after="7d")
+    cache_config=CacheConfig(enable_caching=True, expire_after="7d"),
+    property_files=meta_property_files,
 )
 
 for tgt in TARGET_COLS:
     train_s3 = split_step.properties.ProcessingOutputConfig.Outputs[f"train_{tgt}"].S3Output.S3Uri
     val_s3 = split_step.properties.ProcessingOutputConfig.Outputs[f"validation_{tgt}"].S3Output.S3Uri
-    meta_s3 = split_step.properties.ProcessingOutputConfig.Outputs[f"meta_{tgt}"].S3Output.S3Uri
-
-    # Dynamically extract num_class
-    from urllib.parse import urlparse
-    meta_uri = meta_s3.to_string() + "/class_count.json"
-    parsed = urlparse(meta_uri)
-    meta_bucket = parsed.netloc
-    meta_key = parsed.path.lstrip("/")
-    import json
-    num_class = json.loads(s3.get_object(Bucket=meta_bucket, Key=meta_key)['Body'].read())['num_class']
+    num_class = JsonGet(
+        step_name=split_step.name,
+        property_file=next(pf for pf in meta_property_files if pf.name == f"{tgt}Meta"),
+        json_path="num_class",
+    )
 
     xgb = Estimator(
         image_uri=XGB_IMAGE,
