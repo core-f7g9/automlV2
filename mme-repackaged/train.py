@@ -1,8 +1,9 @@
-# === Modified SageMaker Pipeline: Autopilot with XGBoost-only for MME Deployment ===
-# This version removes custom inference script & repacking logic. Models are compatible with MME directly.
+# === Cleaned SageMaker Pipeline: Autopilot (XGBoost-only) with MME Deployment ===
 
-import time, json, os
-import boto3, sagemaker
+import os
+import time
+import boto3
+import sagemaker
 from sagemaker.workflow.pipeline import Pipeline
 from sagemaker.workflow.parameters import (
     ParameterString, ParameterFloat, ParameterInteger, ParameterBoolean
@@ -103,11 +104,7 @@ for tgt in TARGET_COLS:
         max_candidates=5,
         max_runtime_per_training_job_in_seconds=1800,
         total_job_runtime_in_seconds=6 * 3600,
-        auto_ml_job_config={
-            "CandidateGenerationConfig": {
-                "AlgorithmsConfig": [{"AutoMLAlgorithms": ["xgboost"]}]
-            }
-        }
+        include_algorithms=["xgboost"]
     )
 
     step = AutoMLStep(name=f"RunAutopilotV1_{tgt}", step_args=automl.fit(inputs=auto_inputs))
