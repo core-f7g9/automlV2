@@ -33,7 +33,8 @@ print("Endpoint:", ENDPOINT_NAME)
 # ============================================================
 import os, textwrap
 
-# NOTE: No f-string, no .format() — prevents brace conflicts entirely.
+# NOTE: Plain string + .replace on ROLE_ARN.
+# No f-strings, no .format() on the big block, so {} are safe.
 lambda_script = textwrap.dedent("""
 import json
 import boto3
@@ -94,23 +95,23 @@ def handler(event, context):
         s3.copy_object(
             Bucket=dest_bucket,
             Key=dest_key,
-            CopySource={{
+            CopySource={
                 "Bucket": src_bucket,
                 "Key": src_key
-            }},
+            },
         )
 
-    # ---- Step 2: Create Multi-Model Model ----
+    # ---- Step 2: Create or reuse Multi-Model Model ----
     model_name = "{}-mme-model".format(endpoint_name)
 
     from sagemaker import image_uris
     sklearn_image = image_uris.retrieve("sklearn", boto3.Session().region_name, version="1.2-1")
 
-    container_def = {{
+    container_def = {
         "Image": sklearn_image,
         "ModelDataUrl": mme_prefix,
         "Mode": "MultiModel",
-    }}
+    }
 
     try:
         sm.describe_model(ModelName=model_name)
@@ -130,12 +131,12 @@ def handler(event, context):
     sm.create_endpoint_config(
         EndpointConfigName=config_name,
         ProductionVariants=[
-            {{
+            {
                 "ModelName": model_name,
                 "VariantName": "AllTraffic",
                 "InitialInstanceCount": instance_count,
                 "InstanceType": instance_type,
-            }}
+            }
         ],
     )
 
@@ -154,15 +155,15 @@ def handler(event, context):
             EndpointConfigName=config_name
         )
 
-    return {{
+    return {
         "status": "OK",
         "endpoint": endpoint_name,
         "mme_prefix": mme_prefix,
         "deployed_models": deployed_models
-    }}
+    }
 """)
 
-# Insert role ARN safely
+# Safely inject the role ARN
 lambda_script = lambda_script.replace("__ROLE_ARN__", role_arn)
 
 with open("deploy_mme_lambda.py", "w") as f:
