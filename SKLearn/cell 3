@@ -1,5 +1,5 @@
 # ============================================================
-# Cell 3: Write SKLearn train + inference script (Python 3.9 safe)
+# Cell 3: SKLearn train + inference script with hashing trick
 # ============================================================
 import os, textwrap
 
@@ -10,78 +10,107 @@ import os
 import argparse
 import io
 import json
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
 import joblib
 
-
-# ---------- Shared featurization helpers ----------
-
-def _split_xy(df: pd.DataFrame, target_name: Optional[str]):
-    \"""
-    Split dataframe into X and y. If target_name is None, return only X.
-    \"""
-    if target_name is not None and target_name in df.columns:
-        y = df[target_name].astype(str)
-        X = df.drop(columns=[target_name])
-    else:
-        y = None
-        X = df.copy()
-    return X, y
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.feature_extraction import FeatureHasher
 
 
-def _featurize(
+# ------------------------
+# Configurable hashing dims
+# ------------------------
+HASH_SIZE_TEXT = 1024    # high-cardinality free text
+HASH_SIZE_CAT  = 256     # categorical short strings
+
+
+# ------------------------
+# Feature hashing utilities
+# ------------------------
+
+def hash_text_series(series: pd.Series, n_features: int) -> np.ndarray:
+    \"\"\"Hash a text column into fixed-dim sparse matrix → dense numpy array.\"\"\"
+    hasher = FeatureHasher(n_features=n_features, input_type="string")
+    # convert values to strings, drop NaN
+    data = series.fillna("__MISSING__").astype(str).tolist()
+    sparse_matrix = hasher.transform([[x] for x in data])
+    return sparse_matrix.toarray()
+
+
+def process_features(
     df: pd.DataFrame,
-    target_name: Optional[str] = None,
-    feature_columns: Optional[List[str]] = None
-):
-    \"""
-    Apply simple featurization:
-      - Numeric columns => fill NaN with 0
-      - Categorical/text => str(), fill missing tokens, one-hot encode
-      - Align to training-time feature columns if provided
-    \"""
-    X_raw, y = _split_xy(df, target_name)
+    feature_columns: Optional[List[str]] = None,
+    text_cols: Optional[List[str]] = None,
+    cat_cols: Optional[List[str]] = None,
+    num_cols: Optional[List[str]] = None,
+    is_training: bool = True,
+    training_meta: Optional[dict] = None
+) -> Tuple[np.ndarray, dict]:
+    \"\"\"
+    Convert df → hashed feature matrix.
+    Returns:
+      X (np.ndarray), meta (dict containing column lists)
+    \"\"\"
 
-    # Identify numeric and categorical
-    num_cols = X_raw.select_dtypes(include=["number", "bool"]).columns.tolist()
-    cat_cols = [c for c in X_raw.columns if c not in num_cols]
+    # Identify column types on training
+    if is_training:
+        num_cols = df.select_dtypes(include=["number", "bool"]).columns.tolist()
+        other_cols = [c for c in df.columns if c not in num_cols]
 
-    # Numeric part
-    X_num = X_raw[num_cols].copy()
-    X_num = X_num.fillna(0)
+        # For simplicity: treat long text separately (LineDescription)
+        text_cols = [c for c in other_cols if c.lower().endswith("description")]
+        # Everything else becomes categorical hashed
+        cat_cols = [c for c in other_cols if c not in text_cols]
 
-    # Categorical part
-    if cat_cols:
-        X_cat = X_raw[cat_cols].astype(str).fillna("__MISSING__")
-        X_cat_dummies = pd.get_dummies(X_cat, dummy_na=False)
-        X_enc = pd.concat(
-            [X_num.reset_index(drop=True), X_cat_dummies.reset_index(drop=True)],
-            axis=1
-        )
+        meta = {
+            "num_cols": num_cols,
+            "text_cols": text_cols,
+            "cat_cols": cat_cols,
+        }
     else:
-        X_enc = X_num.reset_index(drop=True)
+        # use training-time metadata
+        num_cols = training_meta["num_cols"]
+        text_cols = training_meta["text_cols"]
+        cat_cols = training_meta["cat_cols"]
+        meta = training_meta
 
-    # Align to known feature columns (training case defines feature_columns)
-    if feature_columns is not None:
-        X_enc = X_enc.reindex(columns=feature_columns, fill_value=0)
-        out_cols = feature_columns
-    else:
-        out_cols = list(X_enc.columns)
+    # ---- Numeric features ----
+    X_num = df[num_cols].fillna(0).to_numpy(dtype=np.float32)
 
-    return X_enc, y, out_cols
+    # ---- Categorical hashing ----
+    X_cat_list = []
+    for c in cat_cols:
+        Xc = hash_text_series(df[c], HASH_SIZE_CAT)
+        X_cat_list.append(Xc)
+
+    # ---- Text hashing ----
+    X_text_list = []
+    for c in text_cols:
+        Xt = hash_text_series(df[c], HASH_SIZE_TEXT)
+        X_text_list.append(Xt)
+
+    # ---- Concatenate all components ----
+    parts = [X_num]
+    if X_cat_list:
+        parts.extend(X_cat_list)
+    if X_text_list:
+        parts.extend(X_text_list)
+
+    X = np.concatenate(parts, axis=1).astype(np.float32)
+
+    return X, meta
 
 
-# ---------- Training entrypoint ----------
+# ------------------------
+# Training entrypoint
+# ------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--target-name", type=str, required=True)
-    parser.add_argument("--n-estimators", type=int, default=200)
-    parser.add_argument("--max-depth", type=int, default=None)
     args, _ = parser.parse_known_args()
 
     target_name = args.target_name
@@ -93,51 +122,66 @@ if __name__ == "__main__":
     train_df = pd.read_csv(os.path.join(train_dir, "train.csv"), low_memory=False)
     val_df   = pd.read_csv(os.path.join(val_dir,  "validation.csv"), low_memory=False)
 
-    # Featurize
-    X_train, y_train, feature_columns = _featurize(train_df, target_name=target_name)
-    X_val,   y_val,   _ = _featurize(val_df,   target_name=target_name, feature_columns=feature_columns)
+    # Split X, y
+    y_train = train_df[target_name].astype(str)
+    X_train_df = train_df.drop(columns=[target_name])
 
-    # Train RF classifier
+    y_val = val_df[target_name].astype(str)
+    X_val_df = val_df.drop(columns=[target_name])
+
+    # Featurize with hashing (training mode)
+    X_train, fe_meta = process_features(
+        df=X_train_df,
+        is_training=True
+    )
+
+    # Featurize validation using same metadata
+    X_val, _ = process_features(
+        df=X_val_df,
+        is_training=False,
+        training_meta=fe_meta
+    )
+
+    print(f"[train] Feature matrix shapes: train={X_train.shape}, val={X_val.shape}")
+
+    # ---- Train model ----
     clf = RandomForestClassifier(
-        n_estimators=args.n_estimators,
-        max_depth=args.max_depth,
+        n_estimators=200,
+        max_depth=None,
         n_jobs=-1,
         random_state=42
     )
     clf.fit(X_train, y_train)
 
-    # Optional: validation metric
-    if y_val is not None and len(y_val) > 0:
+    # ---- Validation metric ----
+    if len(y_val) > 0:
         acc = (clf.predict(X_val) == y_val).mean()
         print(f"[train] Validation accuracy for {target_name}: {acc:.4f}")
 
-    # Save model bundle
+    # ---- Save bundle ----
     bundle = {
         "model": clf,
-        "feature_columns": feature_columns,
+        "fe_meta": fe_meta,
         "target_name": target_name,
     }
 
     os.makedirs(model_dir, exist_ok=True)
-    joblib.dump(bundle, os.path.join(model_dir, "model.joblib"))
-    print("[train] Saved model bundle")
+    out_path = os.path.join(model_dir, "model.joblib")
+    joblib.dump(bundle, out_path)
+
+    print(f"[train] Saved model bundle to {out_path}")
 
 
-# ---------- Inference hooks for the SKLearn SageMaker container ----------
+# ------------------------
+# Inference handlers
+# ------------------------
 
 def model_fn(model_dir: str):
-    \"""
-    Load the saved model bundle.
-    \"""
-    bundle_path = os.path.join(model_dir, "model.joblib")
-    return joblib.load(bundle_path)
+    bundle = joblib.load(os.path.join(model_dir, "model.joblib"))
+    return bundle
 
 
 def input_fn(input_data, content_type: str):
-    \"""
-    Convert incoming request payload into pandas DataFrame.
-    Supports text/csv and application/json.
-    \"""
     if content_type == "text/csv":
         if isinstance(input_data, (bytes, bytearray)):
             input_data = input_data.decode("utf-8")
@@ -153,22 +197,25 @@ def input_fn(input_data, content_type: str):
 
 
 def predict_fn(data: pd.DataFrame, model_bundle):
-    \"""
-    Apply featurization + model.predict.
-    \"""
-    target_name = model_bundle["target_name"]
-    feature_cols = model_bundle["feature_columns"]
+    target = model_bundle["target_name"]
+    fe_meta = model_bundle["fe_meta"]
     clf = model_bundle["model"]
 
-    X_enc, _, _ = _featurize(data, target_name=None, feature_columns=feature_cols)
-    preds = clf.predict(X_enc)
+    # drop target column if present
+    if target in data.columns:
+        data = data.drop(columns=[target])
+
+    X, _ = process_features(
+        df=data,
+        is_training=False,
+        training_meta=fe_meta
+    )
+
+    preds = clf.predict(X)
     return preds
 
 
 def output_fn(prediction, accept: str):
-    \"""
-    Serialize output.
-    \"""
     if isinstance(prediction, (pd.Series, pd.DataFrame, np.ndarray)):
         preds = prediction.tolist()
     elif isinstance(prediction, list):
