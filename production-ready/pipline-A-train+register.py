@@ -393,24 +393,24 @@ def hash_text_series(series: pd.Series, n_features: int):
 
 
 def process_features(df: pd.DataFrame, is_training=True, training_meta=None):
-    \"\"\"Same logic as in training, but without Python 3.10 union types.\"\"\"
+    \\"\\\"Same logic as in training, but without Python 3.10 union types.\\"\\\"
     if is_training:
-        num_cols = df.select_dtypes(include=[\"number\", \"bool\"]).columns.tolist()
+        num_cols = df.select_dtypes(include=["number", "bool"]).columns.tolist()
         other_cols = [c for c in df.columns if c not in num_cols]
 
-        text_cols = [c for c in other_cols if \"desc\" in c.lower()]
+        text_cols = [c for c in other_cols if "desc" in c.lower()]
         cat_cols = [c for c in other_cols if c not in text_cols]
 
         meta = {
-            \"num_cols\": num_cols,
-            \"text_cols\": text_cols,
-            \"cat_cols\": cat_cols,
+            "num_cols": num_cols,
+            "text_cols": text_cols,
+            "cat_cols": cat_cols,
         }
     else:
         meta = training_meta
-        num_cols = meta[\"num_cols\"]
-        text_cols = meta[\"text_cols\"]
-        cat_cols = meta[\"cat_cols\"]
+        num_cols = meta["num_cols"]
+        text_cols = meta["text_cols"]
+        cat_cols = meta["cat_cols"]
 
     X_num = sparse.csr_matrix(df[num_cols].fillna(0).to_numpy(dtype=np.float32))
 
@@ -431,44 +431,44 @@ def process_features(df: pd.DataFrame, is_training=True, training_meta=None):
 
 
 def load_bundle_from_tar(model_tar_path: str):
-    work_dir = \"/opt/ml/processing/model_artifacts\"
+    work_dir = "/opt/ml/processing/model_artifacts"
     os.makedirs(work_dir, exist_ok=True)
 
-    with tarfile.open(model_tar_path, \"r:gz\") as tar:
+    with tarfile.open(model_tar_path, "r:gz") as tar:
         tar.extractall(path=work_dir)
 
-    bundle_path = os.path.join(work_dir, \"model.joblib\")
+    bundle_path = os.path.join(work_dir, "model.joblib")
     if not os.path.exists(bundle_path):
-        raise FileNotFoundError(f\"model.joblib not found inside {model_tar_path}\")
+        raise FileNotFoundError(f"model.joblib not found inside {model_tar_path}")
 
     bundle = joblib.load(bundle_path)
     return bundle
 
 
 def main():
-    model_dir   = \"/opt/ml/processing/model\"
-    val_dir     = \"/opt/ml/processing/validation\"
-    output_dir  = \"/opt/ml/processing/output\"
+    model_dir   = "/opt/ml/processing/model"
+    val_dir     = "/opt/ml/processing/validation"
+    output_dir  = "/opt/ml/processing/output"
 
     # find model.tar.gz under model_dir
-    candidates = [os.path.join(model_dir, f) for f in os.listdir(model_dir) if f.endswith(\".tar.gz\")]
+    candidates = [os.path.join(model_dir, f) for f in os.listdir(model_dir) if f.endswith(".tar.gz")]
     if not candidates:
-        raise FileNotFoundError(f\"No .tar.gz model found under {model_dir}\")
+        raise FileNotFoundError(f"No .tar.gz model found under {model_dir}")
     model_tar = candidates[0]
 
     bundle = load_bundle_from_tar(model_tar)
-    clf      = bundle[\"model\"]
-    fe_meta  = bundle[\"fe_meta\"]
-    tgt      = bundle[\"target_name\"]
+    clf      = bundle["model"]
+    fe_meta  = bundle["fe_meta"]
+    tgt      = bundle["target_name"]
 
-    val_csv = os.path.join(val_dir, \"validation.csv\")
+    val_csv = os.path.join(val_dir, "validation.csv")
     if not os.path.exists(val_csv):
-        raise FileNotFoundError(f\"validation.csv not found at {val_csv}\")
+        raise FileNotFoundError(f"validation.csv not found at {val_csv}")
 
     val_df = pd.read_csv(val_csv, low_memory=False)
 
     if tgt not in val_df.columns:
-        raise ValueError(f\"Target column '{tgt}' not found in validation.csv\")
+        raise ValueError(f"Target column '{tgt}' not found in validation.csv")
 
     y_true    = val_df[tgt].astype(str)
     X_val_df  = val_df.drop(columns=[tgt])
@@ -477,20 +477,24 @@ def main():
     preds    = clf.predict(X_val)
 
     acc = float(accuracy_score(y_true, preds))
+
+    # ---- NEW: SageMaker-compliant metrics format for Studio UI ----
     metrics = {
-        \"target\": tgt,
-        \"accuracy\": acc,
-        \"count\": int(len(y_true)),
+        "multiclass_classification_metrics": {
+            "accuracy": {
+                "value": acc
+            }
+        }
     }
 
     os.makedirs(output_dir, exist_ok=True)
-    with open(os.path.join(output_dir, \"metrics.json\"), \"w\") as f:
+    with open(os.path.join(output_dir, "metrics.json"), "w") as f:
         json.dump(metrics, f)
 
-    print(f\"[eval] target={tgt} accuracy={acc:.4f} samples={len(y_true)}\")
+    print(f"[eval] target={tgt} accuracy={acc:.4f} samples={len(y_true)}")
 
 
-if __name__ == \"__main__\":
+if __name__ == "__main__":
     main()
 """).strip()
 
