@@ -6,10 +6,7 @@ import boto3
 import sagemaker
 from sagemaker.workflow.pipeline import Pipeline
 from sagemaker.workflow.pipeline_context import PipelineSession
-from sagemaker.workflow.parameters import (
-    ParameterString,
-    ParameterInteger,
-)
+from sagemaker.workflow.parameters import ParameterString, ParameterInteger
 
 region = boto3.Session().region_name
 sm = boto3.client("sagemaker")
@@ -102,7 +99,7 @@ def handler(event, context):
             }}}},
         )
 
-    # ---- Step 2: Create or reuse multi-model Model ----
+    # ---- Step 2: Create or reuse MME model ----
     model_name = endpoint_name + "-mme-model"
 
     from sagemaker import image_uris
@@ -125,7 +122,7 @@ def handler(event, context):
             Containers=[container_def],
         )
 
-    # ---- Step 3: Create new endpoint config ----
+    # ---- Step 3: New endpoint config ----
     import time
     config_name = f"{{{{endpoint_name}}}}-config-{{{{int(time.time())}}}}"
 
@@ -222,5 +219,14 @@ pipeline_b = Pipeline(
 )
 
 pipeline_b.upsert(role_arn=role_arn)
+
+# -------------------------------
+# Add the required 20 second wait
+# -------------------------------
+import time
+print("Waiting 20 seconds for Lambda to finish creating...")
+time.sleep(20)
+
 execution = pipeline_b.start()
 print("Pipeline B execution started:", execution.arn)
+
