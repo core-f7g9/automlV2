@@ -363,6 +363,91 @@ with open("sklearn_src/model_script.py", "w") as f:
 print("Wrote sklearn_src/model_script.py")
 
 # ============================================================
+# Cell X: Write inference.py into sklearn_src for MME serving
+# ============================================================
+
+import os, textwrap
+
+inference_script = textwrap.dedent("""
+import json
+import joblib
+import pandas as pd
+import numpy as np
+import io
+from scipy import sparse
+from sklearn.feature_extraction import FeatureHasher
+
+
+HASH_SIZE_TEXT = 128
+HASH_SIZE_CAT  = 32
+
+
+def hash_text_series(series, n_features):
+    hasher = FeatureHasher(n_features=n_features, input_type="string")
+    data = series.fillna("__MISSING__").astype(str).tolist()
+    return hasher.transform([[x] for x in data])
+
+
+def process_features(df, fe_meta):
+    num_cols  = fe_meta["num_cols"]
+    text_cols = fe_meta["text_cols"]
+    cat_cols  = fe_meta["cat_cols"]
+
+    X_num = sparse.csr_matrix(df[num_cols].fillna(0).to_numpy(dtype=np.float32))
+
+    X_cat = [hash_text_series(df[c], HASH_SIZE_CAT) for c in cat_cols]
+    X_txt = [hash_text_series(df[c], HASH_SIZE_TEXT) for c in text_cols]
+
+    X = sparse.hstack([X_num] + X_cat + X_txt).tocsr()
+    return X
+
+
+def model_fn(model_dir):
+    bundle = joblib.load(f"{model_dir}/model.joblib")
+    return bundle
+
+
+def input_fn(request_body, content_type):
+    if content_type == "application/json":
+        obj = json.loads(request_body)
+        if isinstance(obj, list):
+            return pd.DataFrame(obj)
+        return pd.DataFrame([obj])
+
+    if content_type == "text/csv":
+        if isinstance(request_body, (bytes, bytearray)):
+            request_body = request_body.decode("utf-8")
+        return pd.read_csv(io.StringIO(request_body))
+
+    raise ValueError(f"Unsupported content type: {content_type}")
+
+
+def predict_fn(df, model_bundle):
+    target = model_bundle["target_name"]
+    fe_meta = model_bundle["fe_meta"]
+    clf = model_bundle["model"]
+
+    if target in df.columns:
+        df = df.drop(columns=[target])
+
+    X = process_features(df, fe_meta)
+    preds = clf.predict(X)
+    return preds
+
+
+def output_fn(prediction, accept):
+    if hasattr(prediction, "tolist"):
+        prediction = prediction.tolist()
+    return json.dumps({"prediction": prediction}), accept
+""")
+
+os.makedirs("sklearn_src", exist_ok=True)
+with open("sklearn_src/inference.py", "w") as f:
+    f.write(inference_script)
+
+print("Wrote sklearn_src/inference.py")
+
+# ============================================================
 # Cell 4: Write evaluation script (per-target accuracy)
 # ============================================================
 import os, textwrap

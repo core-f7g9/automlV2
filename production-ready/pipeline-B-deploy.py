@@ -29,7 +29,7 @@ print("MME Prefix:", MME_PREFIX)
 print("Endpoint:", ENDPOINT_NAME)
 
 # ============================================================
-# Cell 2: Lambda script for MME deployment (FINAL WORKING VERSION)
+# Cell 2: Lambda script for MME deployment (UPDATED)
 # ============================================================
 import os, textwrap
 
@@ -38,7 +38,6 @@ SKLEARN_IMAGE = "683313688378.dkr.ecr.us-east-1.amazonaws.com/sagemaker-scikit-l
 lambda_script = textwrap.dedent("""
 import json
 import boto3
-import os
 from urllib.parse import urlparse
 
 sm = boto3.client("sagemaker")
@@ -47,9 +46,10 @@ s3 = boto3.client("s3")
 ROLE_ARN = "__ROLE_ARN__"
 SKLEARN_IMAGE = "__SKLEARN_IMAGE__"
 
+
 def _parse_s3(uri):
-    p = urlparse(uri)
-    return p.netloc, p.path.lstrip("/")
+    parsed = urlparse(uri)
+    return parsed.netloc, parsed.path.lstrip("/")
 
 
 def handler(event, context):
@@ -66,66 +66,63 @@ def handler(event, context):
     if not dest_prefix.endswith("/"):
         dest_prefix += "/"
 
-    deployed_models = {}
+    deployed = {}
 
-    # ---- Step 1: Find latest Approved model for each target ----
+    # ---------------------------------------------------------
+    # Load latest Approved model packages for each target
+    # ---------------------------------------------------------
     for tgt in targets:
-        group = "{}-{}-models".format(client_name, tgt)
+        pkg_group = f"{client_name}-{tgt}-models"
 
         resp = sm.list_model_packages(
-            ModelPackageGroupName=group,
+            ModelPackageGroupName=pkg_group,
             SortBy="CreationTime",
-            SortOrder="Descending",
+            SortOrder="Descending"
         )
+        pkg_arn = resp["ModelPackageSummaryList"][0]["ModelPackageArn"]
 
-        if len(resp["ModelPackageSummaryList"]) == 0:
-            raise ValueError("No registered models for {}".format(group))
+        desc = sm.describe_model_package(ModelPackageName=pkg_arn)
+        model_uri = desc["InferenceSpecification"]["Containers"][0]["ModelDataUrl"]
 
-        pkg = resp["ModelPackageSummaryList"][0]
-        pkg_name = pkg["ModelPackageArn"]
+        deployed[tgt] = model_uri
 
-        details = sm.describe_model_package(ModelPackageName=pkg_name)
-        data_uri = details["InferenceSpecification"]["Containers"][0]["ModelDataUrl"]
-
-        deployed_models[tgt] = data_uri
-
-        # ---- Copy model.tar.gz -> MME prefix ----
-        src_bucket, src_key = _parse_s3(data_uri)
-        dest_key = "{}{}.tar.gz".format(dest_prefix, tgt)
+        src_bucket, src_key = _parse_s3(model_uri)
+        dest_key = f"{dest_prefix}{tgt}.tar.gz"
 
         s3.copy_object(
             Bucket=dest_bucket,
             Key=dest_key,
-            CopySource={
-                "Bucket": src_bucket,
-                "Key": src_key
-            },
+            CopySource={"Bucket": src_bucket, "Key": src_key}
         )
 
-    # ---- Step 2: Create Multi-Model container definition ----
-    model_name = "{}-mme-model".format(endpoint_name)
+    # ---------------------------------------------------------
+    # Create (or reuse) the SageMaker Model for MME
+    # ---------------------------------------------------------
+    model_name = f"{endpoint_name}-mme-model"
 
-    container_def = {
+    container = {
         "Image": SKLEARN_IMAGE,
         "ModelDataUrl": mme_prefix,
         "Mode": "MultiModel",
+        "Environment": {
+            "SAGEMAKER_PROGRAM": "inference.py"
+        }
     }
 
-    # ---- Step 3: Create or reuse SageMaker Model ----
     try:
         sm.describe_model(ModelName=model_name)
-        print("Reusing existing model {}".format(model_name))
     except:
-        print("Creating model {}".format(model_name))
         sm.create_model(
             ModelName=model_name,
             ExecutionRoleArn=ROLE_ARN,
-            Containers=[container_def],
+            Containers=[container]
         )
 
-    # ---- Step 4: Create fresh endpoint config ----
+    # ---------------------------------------------------------
+    # Create endpoint config
+    # ---------------------------------------------------------
     import time
-    config_name = "{}-config-{}".format(endpoint_name, int(time.time()))
+    config_name = f"{endpoint_name}-config-{int(time.time())}"
 
     sm.create_endpoint_config(
         EndpointConfigName=config_name,
@@ -134,42 +131,36 @@ def handler(event, context):
                 "ModelName": model_name,
                 "VariantName": "AllTraffic",
                 "InitialInstanceCount": instance_count,
-                "InstanceType": instance_type,
+                "InstanceType": instance_type
             }
-        ],
+        ]
     )
 
-    # ---- Step 5: Create or Update endpoint ----
+    # ---------------------------------------------------------
+    # Create or update endpoint
+    # ---------------------------------------------------------
     try:
         sm.describe_endpoint(EndpointName=endpoint_name)
-        print("Updating endpoint {}".format(endpoint_name))
         sm.update_endpoint(
             EndpointName=endpoint_name,
             EndpointConfigName=config_name
         )
     except:
-        print("Creating endpoint {}".format(endpoint_name))
         sm.create_endpoint(
             EndpointName=endpoint_name,
             EndpointConfigName=config_name
         )
 
-    return {
-        "status": "OK",
-        "endpoint": endpoint_name,
-        "mme_prefix": mme_prefix,
-        "deployed_models": deployed_models
-    }
+    return {"status": "OK", "deployed": deployed}
 """)
 
-# Inject role ARN and image safely
 lambda_script = lambda_script.replace("__ROLE_ARN__", role_arn)
 lambda_script = lambda_script.replace("__SKLEARN_IMAGE__", SKLEARN_IMAGE)
 
 with open("deploy_mme_lambda.py", "w") as f:
     f.write(lambda_script)
 
-print("Wrote deploy_mme_lambda.py (FINAL WORKING VERSION)")
+print("Wrote updated deploy_mme_lambda.py")
 
 # ============================================================
 # Cell 3: Pipeline B definition (Deployment Pipeline)
