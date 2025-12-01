@@ -393,7 +393,7 @@ def hash_text_series(series: pd.Series, n_features: int):
 
 
 def process_features(df: pd.DataFrame, is_training=True, training_meta=None):
-    \\"\\\"Same logic as in training, but without Python 3.10 union types.\\"\\\"
+    '''Same logic as in training, but without Python 3.10 union types.'''
     if is_training:
         num_cols = df.select_dtypes(include=["number", "bool"]).columns.tolist()
         other_cols = [c for c in df.columns if c not in num_cols]
@@ -478,7 +478,7 @@ def main():
 
     acc = float(accuracy_score(y_true, preds))
 
-    # ---- NEW: SageMaker-compliant metrics format for Studio UI ----
+    # ---- SageMaker-compliant metrics format for Studio UI ----
     metrics = {
         "multiclass_classification_metrics": {
             "accuracy": {
