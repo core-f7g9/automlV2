@@ -1,5 +1,5 @@
 # ============================================================
-# Cell 5: Pipeline — SKLearn (Hashing + SGDClassifier) + MME
+# Cell 5: Final Pipeline — SKLearn Hashing Models + MME Deploy
 # ============================================================
 import boto3
 import sagemaker
@@ -14,16 +14,16 @@ from sagemaker.workflow.pipeline_context import PipelineSession
 from sagemaker.workflow.functions import Join
 from sagemaker.lambda_helper import Lambda
 from sagemaker.workflow.lambda_step import LambdaStep, LambdaOutput, LambdaOutputTypeEnum
+from sagemaker.sklearn.estimator import SKLearn
 
-# ----------------------------------------
-# Pipeline setup
-# ----------------------------------------
+# -----------------------------------------------------------
+# Base configuration from earlier cells
+# -----------------------------------------------------------
 region   = boto3.Session().region_name
 p_sess   = PipelineSession()
 sm_sess  = sagemaker.Session()
 role_arn = sagemaker.get_execution_role()
 
-# Pull variables from your earlier cells
 CLIENT_NAME   = CLIENT_NAME
 PROJECT_NAME  = PROJECT_NAME
 OUTPUT_PREFIX = OUTPUT_PREFIX
@@ -32,9 +32,9 @@ INPUT_S3CSV   = INPUT_S3CSV
 TARGET_COLS    = TARGET_COLS
 INPUT_FEATURES = INPUT_FEATURES
 
-# ----------------------------------------
-# Pipeline parameters
-# ----------------------------------------
+# -----------------------------------------------------------
+# Pipeline Parameters
+# -----------------------------------------------------------
 bucket_param          = ParameterString("Bucket", default_value=BUCKET)
 input_s3_csv_param    = ParameterString("InputS3CSV", default_value=INPUT_S3CSV)
 val_frac_param        = ParameterFloat("ValFrac", default_value=0.20)
@@ -47,16 +47,16 @@ EndpointNameParam      = ParameterString("EndpointName", default_value=f"{PROJEC
 InstanceTypeParam      = ParameterString("InstanceType", default_value="ml.m5.large")
 InitialInstanceCount   = ParameterInteger("InitialInstanceCount", default_value=1)
 
-# ----------------------------------------
-# SKLearn container
-# ----------------------------------------
+# -----------------------------------------------------------
+# SageMaker SKLearn container
+# -----------------------------------------------------------
 sklearn_version = "1.2-1"
 sklearn_image = sagemaker.image_uris.retrieve("sklearn", region, version=sklearn_version)
 print("Using SKLearn image:", sklearn_image)
 
-# ----------------------------------------
-# Step 1 — Preprocessing (split per target)
-# ----------------------------------------
+# -----------------------------------------------------------
+# Step 1 — Split per target using ScriptProcessor
+# -----------------------------------------------------------
 split_processor = ScriptProcessor(
     image_uri=sklearn_image,
     role=role_arn,
@@ -86,18 +86,20 @@ split_step = ProcessingStep(
         "--random_seed", seed_param.to_string(),
         "--min_support", min_support_param.to_string(),
         "--rare_train_only", rare_train_only_param.to_string(),
+        "--mounted_input_dir", "/opt/ml/processing/input",
+        "--output_dir", "/opt/ml/processing/output",
     ],
     cache_config=CacheConfig(enable_caching=True, expire_after="7d")
 )
 
-# ----------------------------------------
-# Step 2 — Train SKLearn model per target
-# ----------------------------------------
+# -----------------------------------------------------------
+# Step 2 — Train per-target SKLearn model (SGDClassifier + Hashing)
+# -----------------------------------------------------------
 train_steps = {}
 
 for tgt in TARGET_COLS:
 
-    sklearn_estimator = sagemaker.sklearn.SKLearn(
+    sklearn_estimator = SKLearn(
         entry_point="model_script.py",
         source_dir="sklearn_src",
         role=role_arn,
@@ -116,37 +118,37 @@ for tgt in TARGET_COLS:
                 s3_data=split_step.properties.ProcessingOutputConfig.Outputs[f"train_{tgt}"].S3Output.S3Uri,
                 content_type="text/csv",
             ),
-            "validation": sagemaker.inputs.training_input.TrainingInput(
+            "validation": sagemaker.inputs.TrainingInput(
                 s3_data=split_step.properties.ProcessingOutputConfig.Outputs[f"validation_{tgt}"].S3Output.S3Uri,
                 content_type="text/csv",
             ),
         },
-        cache_config=CacheConfig(enable_caching=False)
+        cache_config=CacheConfig(enable_caching=False),
     )
 
     train_steps[tgt] = train_step
 
-# ----------------------------------------
-# Extract all model artifact URIs safely
-# ----------------------------------------
+# -----------------------------------------------------------
+# Model Artifact Collection (safe)
+# -----------------------------------------------------------
 model_artifacts_list = [
     train_steps[t].properties.ModelArtifacts.S3ModelArtifacts
     for t in TARGET_COLS
 ]
 
-# Fail early if ANY model artifact is None
+# Validate artifacts (avoid NoneType.startswith errors)
 for tgt, art in zip(TARGET_COLS, model_artifacts_list):
     if art is None:
         raise ValueError(
-            f"Training output for target '{tgt}' produced no ModelArtifacts. "
-            "Check the training logs for failures."
+            f"Model artifact for target '{tgt}' is None. Training likely failed. "
+            "Check training logs in SageMaker."
         )
 
 model_artifacts_csv = Join(on=",", values=model_artifacts_list)
 
-# ----------------------------------------
-# Step 3 — Lambda: Stage models + Create/Update MME Endpoint
-# ----------------------------------------
+# -----------------------------------------------------------
+# Step 3 — Lambda Deployment Step (MME)
+# -----------------------------------------------------------
 deploy_lambda_name = f"{PROJECT_NAME}-deploy-mme"
 MME_MODELS_PREFIX  = f"s3://{BUCKET}/{OUTPUT_PREFIX}/mme/{CLIENT_NAME}/models/"
 
@@ -167,16 +169,16 @@ deploy_step = LambdaStep(
         "InstanceType": InstanceTypeParam,
         "InitialInstanceCount": InitialInstanceCount,
         "ModelsPrefix": MME_MODELS_PREFIX,
-        "ImageUri": sklearn_image,  # <-- FIX: ensure correct image is passed
+        "ImageUri": sklearn_image,  # critical fix
         "TargetNamesCSV": ",".join(TARGET_COLS),
         "ModelArtifactsCSV": model_artifacts_csv,
     },
-    outputs=[LambdaOutput(output_name="status", output_type=LambdaOutputTypeEnum.String)]
+    outputs=[LambdaOutput(output_name="status", output_type=LambdaOutputTypeEnum.String)],
 )
 
-# ----------------------------------------
-# Only deploy if DeployAfterRegister == True
-# ----------------------------------------
+# -----------------------------------------------------------
+# Deployment condition (only if DeployAfterRegister == True)
+# -----------------------------------------------------------
 from sagemaker.workflow.conditions import ConditionEquals
 from sagemaker.workflow.condition_step import ConditionStep
 
@@ -187,9 +189,9 @@ deploy_condition_step = ConditionStep(
     else_steps=[],
 )
 
-# ----------------------------------------
-# Assemble Pipeline
-# ----------------------------------------
+# -----------------------------------------------------------
+# Build Pipeline
+# -----------------------------------------------------------
 pipeline = Pipeline(
     name=f"{PROJECT_NAME}-pipeline-mme",
     parameters=[
@@ -208,7 +210,9 @@ pipeline = Pipeline(
     sagemaker_session=p_sess,
 )
 
-# Register pipeline
+# -----------------------------------------------------------
+# Register and Run
+# -----------------------------------------------------------
 pipeline.upsert(role_arn=role_arn)
 execution = pipeline.start()
 print("Pipeline execution started:", execution.arn)
