@@ -365,6 +365,8 @@ print("Wrote sklearn_src/model_script.py")
 # ============================================================
 # Cell 4: Write evaluation script (per-target accuracy)
 # ============================================================
+import os, textwrap
+
 eval_script = textwrap.dedent("""
 import os
 import json
@@ -374,10 +376,64 @@ import numpy as np
 import pandas as pd
 import joblib
 
+from sklearn.feature_extraction import FeatureHasher
+from scipy import sparse
 from sklearn.metrics import accuracy_score
 
+# ---- must match training script ----
+HASH_SIZE_TEXT = 128
+HASH_SIZE_CAT  = 32
 
-def load_bundle(model_tar_path: str):
+
+def hash_text_series(series: pd.Series, n_features: int):
+    hasher = FeatureHasher(n_features=n_features, input_type="string")
+    data = series.fillna("__MISSING__").astype(str).tolist()
+    sparse_matrix = hasher.transform([[x] for x in data])
+    return sparse_matrix
+
+
+def process_features(
+    df: pd.DataFrame,
+    is_training: bool = True,
+    training_meta: dict | None = None
+):
+    if is_training:
+        num_cols = df.select_dtypes(include=["number", "bool"]).columns.tolist()
+        other_cols = [c for c in df.columns if c not in num_cols]
+
+        text_cols = [c for c in other_cols if "desc" in c.lower()]
+        cat_cols = [c for c in other_cols if c not in text_cols]
+
+        meta = {
+            "num_cols": num_cols,
+            "text_cols": text_cols,
+            "cat_cols": cat_cols,
+        }
+    else:
+        meta = training_meta
+        num_cols = meta["num_cols"]
+        text_cols = meta["text_cols"]
+        cat_cols = meta["cat_cols"]
+
+    X_num = sparse.csr_matrix(df[num_cols].fillna(0).to_numpy(dtype=np.float32))
+
+    X_cat_list = []
+    for c in cat_cols:
+        Xc = hash_text_series(df[c], HASH_SIZE_CAT)
+        X_cat_list.append(Xc)
+
+    X_text_list = []
+    for c in text_cols:
+        Xt = hash_text_series(df[c], HASH_SIZE_TEXT)
+        X_text_list.append(Xt)
+
+    parts = [X_num] + X_cat_list + X_text_list
+    X = sparse.hstack(parts).tocsr()
+
+    return X, meta
+
+
+def load_bundle_from_tar(model_tar_path: str):
     work_dir = "/opt/ml/processing/model_artifacts"
     os.makedirs(work_dir, exist_ok=True)
 
@@ -385,50 +441,52 @@ def load_bundle(model_tar_path: str):
         tar.extractall(path=work_dir)
 
     bundle_path = os.path.join(work_dir, "model.joblib")
+    if not os.path.exists(bundle_path):
+        raise FileNotFoundError(f"model.joblib not found inside {model_tar_path}")
+
     bundle = joblib.load(bundle_path)
     return bundle
 
 
 def main():
-    model_dir = os.environ.get("SM_MODEL_DIR", "/opt/ml/processing/model")
-    val_dir   = os.environ.get("SM_CHANNEL_VALIDATION", "/opt/ml/processing/validation")
-    output_dir = os.environ.get("SM_OUTPUT_DATA_DIR", "/opt/ml/processing/output")
-    target_name = os.environ.get("TARGET_NAME")
+    model_dir   = "/opt/ml/processing/model"
+    val_dir     = "/opt/ml/processing/validation"
+    output_dir  = "/opt/ml/processing/output"
 
-    # model.tar.gz usually at model_dir/model.tar.gz
-    model_tar = os.path.join(model_dir, "model.tar.gz")
-    if not os.path.exists(model_tar):
-        # Some pipeline configs mount it directly as model.tar.gz
-        # Try common fallback
-        candidates = [os.path.join(model_dir, f) for f in os.listdir(model_dir) if f.endswith(".tar.gz")]
-        if not candidates:
-            raise FileNotFoundError(f"No model tar.gz found under {model_dir}")
-        model_tar = candidates[0]
+    # find model.tar.gz under model_dir
+    candidates = [os.path.join(model_dir, f) for f in os.listdir(model_dir) if f.endswith(".tar.gz")]
+    if not candidates:
+        raise FileNotFoundError(f"No .tar.gz model found under {model_dir}")
+    model_tar = candidates[0]
 
-    bundle = load_bundle(model_tar)
-    clf = bundle["model"]
-    fe_meta = bundle["fe_meta"]
-    tgt = bundle["target_name"]
+    bundle = load_bundle_from_tar(model_tar)
+    clf      = bundle["model"]
+    fe_meta  = bundle["fe_meta"]
+    tgt      = bundle["target_name"]
 
-    if target_name and target_name != tgt:
-        print(f"[eval] WARNING: TARGET_NAME env({target_name}) != bundle target({tgt})")
+    val_csv = os.path.join(val_dir, "validation.csv")
+    if not os.path.exists(val_csv):
+        raise FileNotFoundError(f"validation.csv not found at {val_csv}")
 
-    val_df = pd.read_csv(os.path.join(val_dir, "validation.csv"), low_memory=False)
-    y_true = val_df[tgt].astype(str)
-    X_val_df = val_df.drop(columns=[tgt])
+    val_df = pd.read_csv(val_csv, low_memory=False)
 
-    from model_script import process_features   # relies on same code in source_dir
+    if tgt not in val_df.columns:
+        raise ValueError(f"Target column '{tgt}' not found in validation.csv")
+
+    y_true    = val_df[tgt].astype(str)
+    X_val_df  = val_df.drop(columns=[tgt])
+
     X_val, _ = process_features(df=X_val_df, is_training=False, training_meta=fe_meta)
+    preds    = clf.predict(X_val)
 
-    preds = clf.predict(X_val)
     acc = float(accuracy_score(y_true, preds))
-
-    os.makedirs(output_dir, exist_ok=True)
     metrics = {
         "target": tgt,
         "accuracy": acc,
         "count": int(len(y_true)),
     }
+
+    os.makedirs(output_dir, exist_ok=True)
     with open(os.path.join(output_dir, "metrics.json"), "w") as f:
         json.dump(metrics, f)
 
@@ -439,6 +497,7 @@ if __name__ == "__main__":
     main()
 """).strip()
 
+os.makedirs("sklearn_src", exist_ok=True)
 with open("sklearn_src/evaluate_model.py", "w") as f:
     f.write(eval_script)
 
@@ -466,8 +525,9 @@ sm_sess  = sagemaker.Session()
 p_sess   = PipelineSession()
 role_arn = sagemaker.get_execution_role()
 
-# Reuse your existing variables from Cell 1
-# CLIENT_NAME, PROJECT_NAME, OUTPUT_PREFIX, BUCKET, INPUT_S3CSV, TARGET_COLS, INPUT_FEATURES
+# Reuse from Cell 1:
+# CLIENT_NAME, PROJECT_NAME, OUTPUT_PREFIX, BUCKET, INPUT_S3CSV
+# TARGET_COLS, INPUT_FEATURES
 
 # -------- Pipeline parameters --------
 bucket_param          = ParameterString("Bucket", default_value=BUCKET)
@@ -481,7 +541,7 @@ sklearn_version = "1.2-1"
 sklearn_image   = sagemaker.image_uris.retrieve("sklearn", region, version=sklearn_version)
 print("Using SKLearn image:", sklearn_image)
 
-# -------- Step 1 — per-target splits (reuse your script) --------
+# -------- Step 1 — per-target splits --------
 split_processor = ScriptProcessor(
     image_uri=sklearn_image,
     role=role_arn,
@@ -524,8 +584,8 @@ split_step = ProcessingStep(
 )
 
 # -------- Step 2 & 3 — Train + Evaluate + Register per target --------
-train_steps   = {}
-eval_steps    = {}
+train_steps    = {}
+eval_steps     = {}
 register_steps = []
 
 for tgt in TARGET_COLS:
@@ -567,7 +627,6 @@ for tgt in TARGET_COLS:
         instance_count=1,
         command=["python3"],
         sagemaker_session=p_sess,
-        source_dir="sklearn_src",
     )
 
     eval_step = ProcessingStep(
@@ -589,13 +648,12 @@ for tgt in TARGET_COLS:
                 source="/opt/ml/processing/output",
             )
         ],
-        code="evaluate_model.py",
-        job_arguments=[],
+        code="sklearn_src/evaluate_model.py",
         cache_config=CacheConfig(enable_caching=False),
     )
     eval_steps[tgt] = eval_step
 
-    # ---- Model Metrics for registry (optional) ----
+    # ---- Model Metrics for registry ----
     metrics_s3_uri = eval_step.properties.ProcessingOutputConfig.Outputs["metrics"].S3Output.S3Uri
     model_metrics = ModelMetrics(
         model_statistics=MetricsSource(
@@ -617,8 +675,8 @@ for tgt in TARGET_COLS:
         transform_instances=["ml.m5.large"],
         model_package_group_name=model_package_group_name,
         model_metrics=model_metrics,
-        approval_status="Approved",  # or "PendingManualApproval"
-        image_uri=sklearn_image,     # important for compatibility
+        approval_status="Approved",   # or "PendingManualApproval"
+        image_uri=sklearn_image,
     )
 
     register_steps.append(register_step)
@@ -641,5 +699,3 @@ pipeline_a = Pipeline(
 pipeline_a.upsert(role_arn=role_arn)
 execution = pipeline_a.start()
 print("Pipeline A execution started:", execution.arn)
-
-
