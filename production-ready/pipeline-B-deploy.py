@@ -29,10 +29,11 @@ print("MME Prefix:", MME_PREFIX)
 print("Endpoint:", ENDPOINT_NAME)
 
 # ============================================================
-# Cell 2: Lambda script for MME deployment (using .format() safely)
+# Cell 2: Lambda script for MME deployment (SAFE VERSION)
 # ============================================================
 import os, textwrap
 
+# NOTE: No f-string, no .format() — prevents brace conflicts entirely.
 lambda_script = textwrap.dedent("""
 import json
 import boto3
@@ -42,7 +43,7 @@ from urllib.parse import urlparse
 sm = boto3.client("sagemaker")
 s3 = boto3.client("s3")
 
-ROLE_ARN = "{role_arn}"
+ROLE_ARN = "__ROLE_ARN__"
 
 def _parse_s3(uri):
     p = urlparse(uri)
@@ -159,12 +160,15 @@ def handler(event, context):
         "mme_prefix": mme_prefix,
         "deployed_models": deployed_models
     }}
-""").format(role_arn=role_arn)
+""")
+
+# Insert role ARN safely
+lambda_script = lambda_script.replace("__ROLE_ARN__", role_arn)
 
 with open("deploy_mme_lambda.py", "w") as f:
     f.write(lambda_script)
 
-print("Wrote deploy_mme_lambda.py")
+print("Wrote deploy_mme_lambda.py (safe version)")
 
 # ============================================================
 # Cell 3: Pipeline B definition (Deployment Pipeline)
