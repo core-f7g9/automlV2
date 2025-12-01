@@ -29,12 +29,12 @@ print("MME Prefix:", MME_PREFIX)
 print("Endpoint:", ENDPOINT_NAME)
 
 # ============================================================
-# Cell 2: Lambda script for MME deployment (SAFE VERSION)
+# Cell 2: Lambda script for MME deployment (FINAL WORKING VERSION)
 # ============================================================
 import os, textwrap
 
-# NOTE: Plain string + .replace on ROLE_ARN.
-# No f-strings, no .format() on the big block, so {} are safe.
+SKLEARN_IMAGE = "683313688378.dkr.ecr.us-east-1.amazonaws.com/sagemaker-scikit-learn:1.2-1-cpu-py3"
+
 lambda_script = textwrap.dedent("""
 import json
 import boto3
@@ -45,6 +45,7 @@ sm = boto3.client("sagemaker")
 s3 = boto3.client("s3")
 
 ROLE_ARN = "__ROLE_ARN__"
+SKLEARN_IMAGE = "__SKLEARN_IMAGE__"
 
 def _parse_s3(uri):
     p = urlparse(uri)
@@ -67,7 +68,7 @@ def handler(event, context):
 
     deployed_models = {}
 
-    # ---- Step 1: Get latest Approved model for each target ----
+    # ---- Step 1: Find latest Approved model for each target ----
     for tgt in targets:
         group = "{}-{}-models".format(client_name, tgt)
 
@@ -88,7 +89,7 @@ def handler(event, context):
 
         deployed_models[tgt] = data_uri
 
-        # Copy model.tar.gz → MME prefix
+        # ---- Copy model.tar.gz -> MME prefix ----
         src_bucket, src_key = _parse_s3(data_uri)
         dest_key = "{}{}.tar.gz".format(dest_prefix, tgt)
 
@@ -101,18 +102,16 @@ def handler(event, context):
             },
         )
 
-    # ---- Step 2: Create or reuse Multi-Model Model ----
+    # ---- Step 2: Create Multi-Model container definition ----
     model_name = "{}-mme-model".format(endpoint_name)
 
-    from sagemaker import image_uris
-    sklearn_image = image_uris.retrieve("sklearn", boto3.Session().region_name, version="1.2-1")
-
     container_def = {
-        "Image": sklearn_image,
+        "Image": SKLEARN_IMAGE,
         "ModelDataUrl": mme_prefix,
         "Mode": "MultiModel",
     }
 
+    # ---- Step 3: Create or reuse SageMaker Model ----
     try:
         sm.describe_model(ModelName=model_name)
         print("Reusing existing model {}".format(model_name))
@@ -124,7 +123,7 @@ def handler(event, context):
             Containers=[container_def],
         )
 
-    # ---- Step 3: Create new endpoint config ----
+    # ---- Step 4: Create fresh endpoint config ----
     import time
     config_name = "{}-config-{}".format(endpoint_name, int(time.time()))
 
@@ -140,7 +139,7 @@ def handler(event, context):
         ],
     )
 
-    # ---- Step 4: Create or update endpoint ----
+    # ---- Step 5: Create or Update endpoint ----
     try:
         sm.describe_endpoint(EndpointName=endpoint_name)
         print("Updating endpoint {}".format(endpoint_name))
@@ -163,13 +162,14 @@ def handler(event, context):
     }
 """)
 
-# Safely inject the role ARN
+# Inject role ARN and image safely
 lambda_script = lambda_script.replace("__ROLE_ARN__", role_arn)
+lambda_script = lambda_script.replace("__SKLEARN_IMAGE__", SKLEARN_IMAGE)
 
 with open("deploy_mme_lambda.py", "w") as f:
     f.write(lambda_script)
 
-print("Wrote deploy_mme_lambda.py (safe version)")
+print("Wrote deploy_mme_lambda.py (FINAL WORKING VERSION)")
 
 # ============================================================
 # Cell 3: Pipeline B definition (Deployment Pipeline)
