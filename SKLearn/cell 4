@@ -1,11 +1,14 @@
 # ============================================================
 # Cell 4: Lambda script to stage models & deploy MME endpoint
 # ============================================================
+import textwrap
+import os
+import json
+
 lambda_script = textwrap.dedent(f"""
 import os
 import json
 from urllib.parse import urlparse
-
 import boto3
 
 sm = boto3.client("sagemaker")
@@ -13,75 +16,119 @@ s3 = boto3.client("s3")
 
 ROLE_ARN = "{role_arn}"
 
+# ---------------------------
+# Safe S3 parser
+# ---------------------------
 def _parse_s3(uri: str):
+    if uri is None:
+        raise ValueError("S3 URI is None. Pipeline passed null ModelDataUrl.")
+    if not isinstance(uri, str):
+        raise ValueError(f"S3 URI is not a string: {{uri}}")
     if not uri.startswith("s3://"):
         raise ValueError(f"Expected s3:// URI, got: {{uri}}")
+
     p = urlparse(uri)
     bucket = p.netloc
-    key = p.path.lstrip("/")
+    key    = p.path.lstrip("/")
+
     if not bucket or not key:
         raise ValueError(f"Malformed S3 URI: {{uri}}")
+
     return bucket, key
 
+# ---------------------------
+# Lambda Handler
+# ---------------------------
 def handler(event, context):
     print("[lambda] event:", json.dumps(event))
 
-    endpoint_name          = event["EndpointName"]
-    instance_type          = event["InstanceType"]
-    initial_instance_count = int(event["InitialInstanceCount"])
-    models_prefix          = event["ModelsPrefix"]
-    image_uri              = event["ImageUri"]
-    target_names_csv       = event["TargetNamesCSV"]
-    model_artifacts_csv    = event["ModelArtifactsCSV"]
+    # Extract fields
+    endpoint_name          = event.get("EndpointName")
+    instance_type          = event.get("InstanceType")
+    initial_instance_count = int(event.get("InitialInstanceCount", 1))
+    models_prefix          = event.get("ModelsPrefix")
+    image_uri              = event.get("ImageUri")
+    target_names_csv       = event.get("TargetNamesCSV")
+    model_artifacts_csv    = event.get("ModelArtifactsCSV")
+
+    # ---------------------------
+    # Validation
+    # ---------------------------
+    if not endpoint_name:
+        raise ValueError("Missing EndpointName")
+    if not instance_type:
+        raise ValueError("Missing InstanceType")
+    if not models_prefix:
+        raise ValueError("Missing ModelsPrefix")
+    if not image_uri:
+        raise ValueError("Missing ImageUri (SKLearn container)")
+    if not target_names_csv:
+        raise ValueError("Missing TargetNamesCSV")
+    if not model_artifacts_csv:
+        raise ValueError("Missing ModelArtifactsCSV")
 
     target_names    = [t for t in target_names_csv.split(",") if t]
     model_artifacts = [m for m in model_artifacts_csv.split(",") if m]
 
     if len(target_names) != len(model_artifacts):
-        raise ValueError(f"Mismatch: {{len(target_names)}} targets vs {{len(model_artifacts)}} artifacts")
+        raise ValueError(
+            f"Target count {{len(target_names)}} != artifact count {{len(model_artifacts)}}"
+        )
 
+    # Parse the prefix
     dest_bucket, dest_prefix = _parse_s3(models_prefix)
     if not dest_prefix.endswith("/"):
         dest_prefix += "/"
 
-    # Stage models into MME prefix as <Target>.tar.gz
+    # ---------------------------
+    # Stage models for MME
+    # ---------------------------
     for tgt, src_uri in zip(target_names, model_artifacts):
+        print(f"[lambda] Processing target={{tgt}} src={{src_uri}}")
+
         src_bucket, src_key = _parse_s3(src_uri)
         dest_key = f"{{dest_prefix}}{{tgt}}.tar.gz"
-        print(f"[lambda] Copying {{src_uri}} -> s3://{{dest_bucket}}/{{dest_key}}")
+
+        print(f"[lambda] Copying to s3://{{dest_bucket}}/{{dest_key}}")
+
         s3.copy_object(
             Bucket=dest_bucket,
             Key=dest_key,
             CopySource={{"Bucket": src_bucket, "Key": src_key}},
         )
 
-    # Create (or reuse) a SageMaker Model with Mode=MultiModel
+    # ---------------------------
+    # SageMaker Model (MultiModel)
+    # ---------------------------
     model_name = endpoint_name + "-mme-model"
-    container = {{
+
+    container_def = {{
         "Image":        image_uri,
-        "ModelDataUrl": models_prefix,
+        "ModelDataUrl": models_prefix,  # MME root prefix
         "Mode":         "MultiModel",
     }}
 
+    print(f"[lambda] Creating/Reusing model: {{model_name}}")
+
     try:
         sm.describe_model(ModelName=model_name)
-        print(f"[lambda] Model {{model_name}} already exists, reusing")
-    except sm.exceptions.ClientError as e:
-        code = e.response.get("Error", {{}}).get("Code", "")
-        if code == "ValidationException":
-            print(f"[lambda] Creating model {{model_name}}")
-            sm.create_model(
-                ModelName        = model_name,
-                ExecutionRoleArn = ROLE_ARN,
-                Containers       = [container],
-            )
-        else:
-            raise
+        print("[lambda] Model exists, reusing.")
+    except sm.exceptions.ClientError:
+        print("[lambda] Creating model...")
+        sm.create_model(
+            ModelName        = model_name,
+            ExecutionRoleArn = ROLE_ARN,
+            Containers       = [container_def],
+        )
 
-    # Create a fresh endpoint config each run (simple & safe)
+    # ---------------------------
+    # Endpoint Config
+    # ---------------------------
     import time
     endpoint_config_name = f"{{endpoint_name}}-config-{{int(time.time())}}"
+
     print(f"[lambda] Creating endpoint config {{endpoint_config_name}}")
+
     sm.create_endpoint_config(
         EndpointConfigName = endpoint_config_name,
         ProductionVariants = [
@@ -95,25 +142,29 @@ def handler(event, context):
         ],
     )
 
-    # Create or update endpoint
+    # ---------------------------
+    # Create or Update endpoint
+    # ---------------------------
+    print(f"[lambda] Deploying endpoint {{endpoint_name}}")
+
     try:
         sm.describe_endpoint(EndpointName=endpoint_name)
-        print(f"[lambda] Updating endpoint {{endpoint_name}}")
+        print("[lambda] Endpoint exists — updating...")
         sm.update_endpoint(
             EndpointName       = endpoint_name,
             EndpointConfigName = endpoint_config_name,
         )
-    except sm.exceptions.ClientError as e:
-        code = e.response.get("Error", {{}}).get("Code", "")
-        if code == "ValidationException":
-            print(f"[lambda] Creating endpoint {{endpoint_name}}")
-            sm.create_endpoint(
-                EndpointName       = endpoint_name,
-                EndpointConfigName = endpoint_config_name,
-            )
-        else:
-            raise
+    except sm.exceptions.ClientError:
+        print("[lambda] Endpoint missing — creating...")
+        sm.create_endpoint(
+            EndpointName       = endpoint_name,
+            EndpointConfigName = endpoint_config_name,
+        )
 
+    # ---------------------------
+    # Done
+    # ---------------------------
+    print("[lambda] Deployment complete.")
     return {{
         "status": "OK",
         "endpoint_name": endpoint_name,
@@ -122,6 +173,7 @@ def handler(event, context):
     }}
 """).strip()
 
+# Write Lambda script file
 with open("deploy_mme_from_sklearn.py", "w") as f:
     f.write(lambda_script)
 
