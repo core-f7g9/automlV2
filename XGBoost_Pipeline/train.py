@@ -79,12 +79,12 @@ split_step = ProcessingStep(
     job_arguments=[
         "--targets_csv", ",".join(TARGETS),
         "--input_features_csv", ",".join(INPUT_FEATURES),
-        "--val_frac", val_frac,
-        "--random_seed", seed,
-        "--min_support", "5",
-        "--rare_train_only", "true",
+        "--val_frac", val_frac.to_string(),
+        "--random_seed", seed.to_string(),
+        "--min_support", min_supp_param.to_string(),
+        "--rare_train_only", rare_train_param.to_string(),
         "--mounted_input_dir", "/opt/ml/processing/input",
-        "--output_dir", "/opt/ml/processing/output"
+        "--output_dir", "/opt/ml/processing/output",
     ]
 )
 
