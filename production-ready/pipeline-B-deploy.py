@@ -29,11 +29,11 @@ print("MME Prefix:", MME_PREFIX)
 print("Endpoint:", ENDPOINT_NAME)
 
 # ============================================================
-# Cell 2: Lambda script for MME deployment (fully escaped)
+# Cell 2: Lambda script for MME deployment (using .format() safely)
 # ============================================================
 import os, textwrap
 
-lambda_script = textwrap.dedent(f"""
+lambda_script = textwrap.dedent("""
 import json
 import boto3
 import os
@@ -63,11 +63,11 @@ def handler(event, context):
     if not dest_prefix.endswith("/"):
         dest_prefix += "/"
 
-    deployed_models = {{}}
+    deployed_models = {}
 
-    # ---- Step 1: For each target, get latest Approved model ----
+    # ---- Step 1: Get latest Approved model for each target ----
     for tgt in targets:
-        group = f"{{{{client_name}}}}-{{{{tgt}}}}-models"
+        group = "{}-{}-models".format(client_name, tgt)
 
         resp = sm.list_model_packages(
             ModelPackageGroupName=group,
@@ -76,7 +76,7 @@ def handler(event, context):
         )
 
         if len(resp["ModelPackageSummaryList"]) == 0:
-            raise ValueError(f"No registered models for {{group}}")
+            raise ValueError("No registered models for {}".format(group))
 
         pkg = resp["ModelPackageSummaryList"][0]
         pkg_name = pkg["ModelPackageArn"]
@@ -88,19 +88,19 @@ def handler(event, context):
 
         # Copy model.tar.gz → MME prefix
         src_bucket, src_key = _parse_s3(data_uri)
-        dest_key = f"{{{{dest_prefix}}}}{{{{tgt}}}}.tar.gz"
+        dest_key = "{}{}.tar.gz".format(dest_prefix, tgt)
 
         s3.copy_object(
             Bucket=dest_bucket,
             Key=dest_key,
-            CopySource={{{{
+            CopySource={{
                 "Bucket": src_bucket,
                 "Key": src_key
-            }}}},
+            }},
         )
 
-    # ---- Step 2: Create or reuse MME model ----
-    model_name = endpoint_name + "-mme-model"
+    # ---- Step 2: Create Multi-Model Model ----
+    model_name = "{}-mme-model".format(endpoint_name)
 
     from sagemaker import image_uris
     sklearn_image = image_uris.retrieve("sklearn", boto3.Session().region_name, version="1.2-1")
@@ -113,18 +113,18 @@ def handler(event, context):
 
     try:
         sm.describe_model(ModelName=model_name)
-        print(f"Reusing existing model {{model_name}}")
+        print("Reusing existing model {}".format(model_name))
     except:
-        print(f"Creating model {{model_name}}")
+        print("Creating model {}".format(model_name))
         sm.create_model(
             ModelName=model_name,
             ExecutionRoleArn=ROLE_ARN,
             Containers=[container_def],
         )
 
-    # ---- Step 3: New endpoint config ----
+    # ---- Step 3: Create new endpoint config ----
     import time
-    config_name = f"{{{{endpoint_name}}}}-config-{{{{int(time.time())}}}}"
+    config_name = "{}-config-{}".format(endpoint_name, int(time.time()))
 
     sm.create_endpoint_config(
         EndpointConfigName=config_name,
@@ -141,13 +141,13 @@ def handler(event, context):
     # ---- Step 4: Create or update endpoint ----
     try:
         sm.describe_endpoint(EndpointName=endpoint_name)
-        print(f"Updating endpoint {{endpoint_name}}")
+        print("Updating endpoint {}".format(endpoint_name))
         sm.update_endpoint(
             EndpointName=endpoint_name,
             EndpointConfigName=config_name
         )
     except:
-        print(f"Creating endpoint {{endpoint_name}}")
+        print("Creating endpoint {}".format(endpoint_name))
         sm.create_endpoint(
             EndpointName=endpoint_name,
             EndpointConfigName=config_name
@@ -159,7 +159,7 @@ def handler(event, context):
         "mme_prefix": mme_prefix,
         "deployed_models": deployed_models
     }}
-""")
+""").format(role_arn=role_arn)
 
 with open("deploy_mme_lambda.py", "w") as f:
     f.write(lambda_script)
