@@ -182,7 +182,7 @@ with open("prepare_per_target_splits.py", "w") as f:
 print("Wrote prepare_per_target_splits.py")
 
 # ============================================================
-# Cell 3: Write SKLearn training/inference script (updated to copy inference.py)
+# Cell 3: Write SKLearn training/inference script (updated to copy inference.py into /code)
 # ============================================================
 import os, textwrap
 
@@ -311,17 +311,21 @@ if __name__ == "__main__":
     print("[train] Saved model bundle to", model_dir)
 
     # ==============================
-    # NEW: ensure inference.py is in model_dir
+    # NEW: ensure inference.py is in model_dir/code for MME
     # ==============================
     import shutil
 
     # In SKLearn estimator, source_dir is placed under /opt/ml/code
     src_inference = os.path.join("/opt/ml/code", "inference.py")
-    dst_inference = os.path.join(model_dir, "inference.py")
+
+    # For Multi-Model Endpoint, each model.tar.gz must contain: code/inference.py
+    code_dir = os.path.join(model_dir, "code")
+    os.makedirs(code_dir, exist_ok=True)
+    dst_inference = os.path.join(code_dir, "inference.py")
 
     if os.path.exists(src_inference):
         shutil.copy(src_inference, dst_inference)
-        print(f"[train] Copied inference.py into {model_dir}")
+        print(f"[train] Copied inference.py into {code_dir}")
     else:
         print(f"[train] WARNING: inference.py not found at {src_inference}")
 
