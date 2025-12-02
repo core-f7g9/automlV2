@@ -12,6 +12,9 @@ from sagemaker.workflow.steps import ProcessingStep, TrainingStep
 from sagemaker.inputs import TrainingInput
 from sagemaker.xgboost.estimator import XGBoost
 from sagemaker.workflow.model_step import ModelStep
+from sagemaker.multidatamodel import MultiDataModel
+from sagemaker.workflow.model_step import ModelStep
+
 
 pipeline_session = PipelineSession()
 
@@ -143,15 +146,17 @@ step_repack = ProcessingStep(
 # MODEL STEP — CREATE MULTI-MODEL MODEL ENTITY
 # -------------------------------
 
-mme_container = {
-    "Image": xgb_image,
-    "ModelDataUrl": f"s3://{BUCKET}/{mme_output}",
-    "Mode": "MultiModel"
-}
+mme_model = MultiDataModel(
+    name="multi-target-xgb-mme",
+    model_data_prefix=f"s3://{BUCKET}/{mme_output}",
+    image_uri=xgb_image,
+    role=role,
+    sagemaker_session=pipeline_session,
+)
 
 step_model = ModelStep(
     name="CreateMMEModel",
-    inputs={"Model": mme_container}
+    step_args=mme_model.create(instance_type="ml.m5.xlarge"),
 )
 
 # -------------------------------
