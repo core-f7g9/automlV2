@@ -1,31 +1,22 @@
 # ============================
-# Cell 6 — Build SageMaker Pipeline
+# Cell 6 — Build SageMaker Pipeline (Corrected)
 # ============================
 
 import os
 import json
-from sagemaker.workflow.steps import ProcessingStep, TrainingStep
+import sagemaker
+from sagemaker.workflow.pipeline import Pipeline
+from sagemaker.workflow.pipeline_context import PipelineSession
 from sagemaker.processing import ScriptProcessor, ProcessingInput, ProcessingOutput
+from sagemaker.workflow.steps import ProcessingStep, TrainingStep
+from sagemaker.inputs import TrainingInput
 from sagemaker.xgboost.estimator import XGBoost
 from sagemaker.workflow.model_step import ModelStep
-from sagemaker.workflow.pipeline import Pipeline
 from sagemaker.model import Model
-from sagemaker.workflow.properties import PropertyFile
-from sagemaker.inputs import TrainingInput
 
-# ---------- PARAMETERS ----------
-preprocess_script = "preprocess.py"
-train_script = "train.py"
-repack_script = "repack_for_mme.py"
-inference_script = "inference.py"
+pipeline_session = PipelineSession()
 
-targets_json = json.dumps(TARGET_COLS)
-
-preprocess_output = f"{PROJECT_PREFIX}/processing"
-models_output = f"{PROJECT_PREFIX}/trained-models"
-mme_output = f"{PROJECT_PREFIX}/mme-packaged"
-
-# ---------- PREPROCESSING STEP ----------
+# ----------- PREPROCESS STEP -----------
 processor = ScriptProcessor(
     image_uri=sagemaker.image_uris.retrieve("sklearn", region, version="1.2-1"),
     role=role,
@@ -33,6 +24,8 @@ processor = ScriptProcessor(
     instance_type="ml.m5.xlarge",
     instance_count=1
 )
+
+preprocess_output = f"{PROJECT_PREFIX}/processing"
 
 step_preprocess = ProcessingStep(
     name="PreprocessData",
@@ -45,35 +38,42 @@ step_preprocess = ProcessingStep(
         )
     ],
     outputs=[
-        ProcessingOutput(output_name="proc_output", source="/opt/ml/processing/output", destination=f"s3://{BUCKET}/{preprocess_output}")
+        ProcessingOutput(
+            output_name="proc_output",
+            source="/opt/ml/processing/output",
+            destination=f"s3://{BUCKET}/{preprocess_output}"
+        )
     ],
-    code=preprocess_script,
+    code="preprocess.py",
     job_arguments=[
         "--input_csv", "/opt/ml/processing/input/data.csv",
-        "--targets", targets_json,
+        "--targets", json.dumps(TARGET_COLS),
         "--output_dir", "/opt/ml/processing/output",
         "--tfidf_max_features", "5000"
     ]
 )
 
-# ---------- TRAINING STEPS (ONE PER TARGET) ----------
+# ----------- TRAINING STEPS -----------
+models_output = f"{PROJECT_PREFIX}/trained-models"
+train_steps = {}
+
 xgb_image = sagemaker.image_uris.retrieve("xgboost", region, version="1.5-1")
 
-train_steps = {}
 for tgt in TARGET_COLS:
-    train_estimator = XGBoost(
-        entry_point=train_script,
+
+    estimator = XGBoost(
+        entry_point="train.py",
         framework_version="1.5-1",
         instance_type="ml.m5.xlarge",
         instance_count=1,
         role=role,
         output_path=f"s3://{BUCKET}/{models_output}/{tgt}",
-        hyperparameters={}
+        base_job_name=f"xgb-{tgt}"
     )
 
     step_train = TrainingStep(
         name=f"Train_{tgt}",
-        estimator=train_estimator,
+        estimator=estimator,
         inputs={
             "train": TrainingInput(
                 s3_data=f"s3://{BUCKET}/{preprocess_output}/{tgt}/train.csv",
@@ -83,18 +83,14 @@ for tgt in TARGET_COLS:
                 s3_data=f"s3://{BUCKET}/{preprocess_output}/{tgt}/val.csv",
                 content_type="text/csv"
             )
-        },
-        job_arguments=[
-            "--train_csv", "/opt/ml/input/data/train/train.csv",
-            "--val_csv", "/opt/ml/input/data/val/val.csv",
-            "--model_dir", "/opt/ml/model"
-        ]
+        }
     )
 
     train_steps[tgt] = step_train
 
+# ----------- REPACK MODELS FOR MME -----------
+mme_output = f"{PROJECT_PREFIX}/mme-packaged"
 
-# ---------- REPACK STEP (MME PACKAGING) ----------
 repack_processor = ScriptProcessor(
     image_uri=sagemaker.image_uris.retrieve("sklearn", region, version="1.2-1"),
     role=role,
@@ -119,7 +115,7 @@ step_repack = ProcessingStep(
         ),
         ProcessingInput(
             input_name="inference_script",
-            source=inference_script,
+            source="inference.py",
             destination="/opt/ml/processing/code"
         )
     ],
@@ -130,7 +126,7 @@ step_repack = ProcessingStep(
             destination=f"s3://{BUCKET}/{mme_output}"
         )
     ],
-    code=repack_script,
+    code="repack_for_mme.py",
     job_arguments=[
         "--models_dir", "/opt/ml/processing/models",
         "--preprocess_dir", "/opt/ml/processing/preprocess",
@@ -138,7 +134,7 @@ step_repack = ProcessingStep(
     ]
 )
 
-# ---------- MODEL STEP (CREATE MME MODEL) ----------
+# ----------- CREATE MME MODEL STEP -----------
 mme_model = Model(
     model_data=f"s3://{BUCKET}/{mme_output}",
     role=role,
@@ -151,14 +147,13 @@ step_model = ModelStep(
     model=mme_model
 )
 
-# ---------- BUILD PIPELINE ----------
+# ----------- COMPILE PIPELINE -----------
 pipeline = Pipeline(
     name="MultiTargetXGBPipeline",
-    parameters=[],
     steps=[step_preprocess] + list(train_steps.values()) + [step_repack, step_model],
     sagemaker_session=pipeline_session
 )
 
 pipeline.upsert(role_arn=role)
 
-print("Pipeline created successfully.")
+print("CORRECTED PIPELINE CREATED SUCCESSFULLY")
