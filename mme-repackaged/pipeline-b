@@ -1,38 +1,119 @@
-import boto3
-from sagemaker.lambda_helper import Lambda
-from sagemaker.workflow.lambda_step import LambdaStep
-from sagemaker.workflow.pipeline import Pipeline
+# ============================
+# Cell 5 — MME Deployment Pipeline
+# ============================
 
-deploy_lambda = Lambda(
+import textwrap
+from sagemaker.lambda_helper import Lambda
+from sagemaker.workflow.lambda_step import LambdaStep, LambdaOutput, LambdaOutputTypeEnum
+
+MME_PREFIX = f"s3://{BUCKET}/{OUTPUT_PREFIX}/mme/{CLIENT_NAME}/models/"
+ENDPOINT_NAME = f"{CLIENT_NAME}-mme-endpoint"
+
+lambda_code = textwrap.dedent("""
+import boto3, json
+from urllib.parse import urlparse
+
+sm = boto3.client("sagemaker")
+s3 = boto3.client("s3")
+
+def handler(event, context):
+    client = event["Client"]
+    targets = event["Targets"].split(",")
+    prefix  = event["Prefix"]
+    endpoint = event["Endpoint"]
+    role_arn = event["RoleArn"]
+    inst_type = event["InstanceType"]
+    inst_count = int(event["InstanceCount"])
+
+    bucket, pref = urlparse(prefix).netloc, urlparse(prefix).path.lstrip("/")
+    if not pref.endswith("/"):
+        pref += "/"
+
+    deployed = {}
+
+    for tgt in targets:
+        group = f"{client}-{tgt}-models"
+        resp = sm.list_model_packages(ModelPackageGroupName=group, SortBy="CreationTime", SortOrder="Descending")
+        pkg = resp["ModelPackageSummaryList"][0]["ModelPackageArn"]
+        desc = sm.describe_model_package(ModelPackageName=pkg)
+        model_uri = desc["InferenceSpecification"]["Containers"][0]["ModelDataUrl"]
+
+        src_bucket, src_key = urlparse(model_uri).netloc, urlparse(model_uri).path.lstrip("/")
+        dst_key = f"{pref}{tgt}.tar.gz"
+
+        s3.copy_object(Bucket=bucket, Key=dst_key, CopySource={"Bucket": src_bucket, "Key": src_key})
+        deployed[tgt] = prefix + tgt + ".tar.gz"
+
+    # Prepare MME model
+    container = {
+        "Image": event["ImageUri"],
+        "ModelDataUrl": prefix,
+        "Mode": "MultiModel",
+        "Environment": {"SAGEMAKER_PROGRAM": "inference.py"}
+    }
+
+    model_name = endpoint + "-mme"
+    try:
+        sm.describe_model(ModelName=model_name)
+    except:
+        sm.create_model(ModelName=model_name, ExecutionRoleArn=role_arn, Containers=[container])
+
+    # Create endpoint config
+    import time
+    cfg = endpoint + "-cfg-" + str(int(time.time()))
+    sm.create_endpoint_config(
+        EndpointConfigName=cfg,
+        ProductionVariants=[{
+            "ModelName": model_name,
+            "VariantName": "AllTraffic",
+            "InitialInstanceCount": inst_count,
+            "InstanceType": inst_type
+        }]
+    )
+
+    # Update or create endpoint
+    try:
+        sm.describe_endpoint(EndpointName=endpoint)
+        sm.update_endpoint(EndpointName=endpoint, EndpointConfigName=cfg)
+    except:
+        sm.create_endpoint(EndpointName=endpoint, EndpointConfigName=cfg)
+
+    return {"deployed": deployed}
+""")
+
+with open("lambda_mme_deploy.py", "w") as f:
+    f.write(lambda_code)
+
+deployment_lambda = Lambda(
     function_name=f"{PROJECT_NAME}-deploy-mme",
     execution_role_arn=role_arn,
-    script="deploy_mme_lambda.py",
+    script="lambda_mme_deploy.py",
     handler="handler",
     timeout=900,
-    memory_size=512,
+    memory_size=512
 )
 
 deploy_step = LambdaStep(
-    name="DeployMME",
-    lambda_func=deploy_lambda,
+    name="Deploy_MME",
+    lambda_func=deployment_lambda,
     inputs={
-        "ClientName": CLIENT_NAME,
-        "TargetsCSV": ",".join(TARGET_COLS),
-        "ModelsPrefix": f"s3://{BUCKET}/{OUTPUT_PREFIX}/mme/{CLIENT_NAME}/models/",
-        "EndpointName": f"{CLIENT_NAME}-mme-endpoint",
+        "Client": CLIENT_NAME,
+        "Targets": ",".join(TARGET_COLS),
+        "Prefix": MME_PREFIX,
+        "Endpoint": ENDPOINT_NAME,
+        "RoleArn": role_arn,
+        "ImageUri": xgb_estimator.image_uri,
         "InstanceType": "ml.m5.large",
-        "InstanceCount": 1,
-        "ExecRoleArn": role_arn,
-    }
+        "InstanceCount": "1"
+    },
+    outputs=[LambdaOutput("deployed", output_type=LambdaOutputTypeEnum.String)]
 )
 
 pipeline_b = Pipeline(
-    name=f"{PROJECT_NAME}-pipeline-B",
-    parameters=[],
+    name=f"{PROJECT_NAME}-pipeline-B-MME",
     steps=[deploy_step],
-    sagemaker_session=p_sess,
+    sagemaker_session=p_sess
 )
 
 pipeline_b.upsert(role_arn=role_arn)
-execution = pipeline_b.start()
-print("Started Pipeline B:", execution.arn)
+print("PipelineB created.")

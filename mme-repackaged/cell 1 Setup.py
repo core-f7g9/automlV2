@@ -13,14 +13,14 @@ p_sess   = PipelineSession()
 role_arn = sagemaker.get_execution_role()
 
 CLIENT_NAME   = "client1"
-PROJECT_NAME  = f"{CLIENT_NAME}-automl-v2-xgb"
+PROJECT_NAME  = f"{CLIENT_NAME}-xgb-hybridtfidf"
 OUTPUT_PREFIX = "mlops"
 
 BUCKET        = sm_sess.default_bucket()
 INPUT_S3CSV   = f"s3://{BUCKET}/input/data.csv"
 
 TARGET_COLS    = ["DepartmentCode", "AccountCode", "SubAccountCode", "LocationCode"]
-INPUT_FEATURES = ["VendorName", "LineDescription", "ClubNumber"]
+INPUT_FEATURES = ["VendorName", "LineDescription", "ClubNumber"]  # numeric treated as text
 
 print("Bucket:", BUCKET)
 print("Input CSV:", INPUT_S3CSV)

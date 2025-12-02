@@ -1,90 +1,69 @@
+# ============================
+# Write inference.py
+# ============================
+
+import textwrap, os
+
+inference_script = textwrap.dedent("""
 import json
-import boto3
-from urllib.parse import urlparse
+import joblib
+import numpy as np
+import xgboost as xgb
+from scipy import sparse
+from sklearn.feature_extraction.text import TfidfVectorizer
 
-sm = boto3.client("sagemaker")
-s3 = boto3.client("s3")
+def model_fn(model_dir):
+    booster = xgb.Booster()
+    booster.load_model(os.path.join(model_dir, "xgb-model.json"))
 
-def parse_s3(uri):
-    p = urlparse(uri)
-    return p.netloc, p.path.lstrip("/")
+    tfidf_word = joblib.load(os.path.join(model_dir, "tfidf_word.pkl"))
+    tfidf_char = joblib.load(os.path.join(model_dir, "tfidf_char.pkl"))
+    le         = joblib.load(os.path.join(model_dir, "label_encoder.pkl"))
+    config     = json.load(open(os.path.join(model_dir, "config.json")))
 
-def handler(event, context):
-    endpoint_name = event["EndpointName"]
-    models_prefix = event["ModelsPrefix"]
-    client_name   = event["ClientName"]
-    target_cols   = event["TargetsCSV"].split(",")
-    instance_type = event["InstanceType"]
-    instance_count = int(event["InstanceCount"])
+    return {
+        "model": booster,
+        "tfidf_word": tfidf_word,
+        "tfidf_char": tfidf_char,
+        "label_encoder": le,
+        "config": config
+    }
 
-    dest_bucket, dest_prefix = parse_s3(models_prefix)
-    if not dest_prefix.endswith("/"):
-        dest_prefix += "/"
+def input_fn(request_body, content_type):
+    if content_type == "application/json":
+        obj = json.loads(request_body)
+        if isinstance(obj, dict):
+            return [obj]
+        return obj
+    raise ValueError("Only JSON supported")
 
-    # built-in xgboost container
-    region = boto3.Session().region_name
-    xgb_image = f"683313688378.dkr.ecr.{region}.amazonaws.com/sagemaker-xgboost:1.5-1"
+def predict_fn(data, bundle):
+    feats = bundle["config"]["text_cols"]
 
-    # Copy model tar files
-    for tgt in target_cols:
-        pkg_group = f"{client_name}-{tgt}-models"
-        resp = sm.list_model_packages(
-            ModelPackageGroupName=pkg_group,
-            SortBy="CreationTime",
-            SortOrder="Descending"
-        )
-        pkg_arn = resp["ModelPackageSummaryList"][0]["ModelPackageArn"]
+    # Convert row dicts → text feature
+    def combine(d):
+        return " ".join(str(d.get(c, "")) for c in feats)
 
-        desc = sm.describe_model_package(ModelPackageName=pkg_arn)
-        model_uri = desc["InferenceSpecification"]["Containers"][0]["ModelDataUrl"]
+    texts = [combine(x) for x in data]
 
-        src_bucket, src_key = parse_s3(model_uri)
-        dst_key = f"{dest_prefix}{tgt}.tar.gz"
+    Xw = bundle["tfidf_word"].transform(texts)
+    Xc = bundle["tfidf_char"].transform(texts)
 
-        s3.copy_object(
-            Bucket=dest_bucket,
-            Key=dst_key,
-            CopySource={"Bucket": src_bucket, "Key": src_key}
-        )
+    X = sparse.hstack([Xw, Xc]).tocsr()
+    dm = xgb.DMatrix(X)
 
-    model_name = f"{endpoint_name}-mme-model"
-    try:
-        sm.describe_model(ModelName=model_name)
-    except:
-        sm.create_model(
-            ModelName=model_name,
-            ExecutionRoleArn=event["ExecRoleArn"],
-            PrimaryContainer={
-                "Image": xgb_image,
-                "ModelDataUrl": models_prefix,
-                "Mode": "MultiModel",
-            }
-        )
+    preds = bundle["model"].predict(dm)
+    labels = preds.argmax(axis=1)
+    decoded = bundle["label_encoder"].inverse_transform(labels)
 
-    config_name = f"{endpoint_name}-config"
+    return decoded.tolist()
 
-    sm.create_endpoint_config(
-        EndpointConfigName=config_name,
-        ProductionVariants=[
-            {
-                "ModelName": model_name,
-                "VariantName": "AllTraffic",
-                "InitialInstanceCount": instance_count,
-                "InstanceType": instance_type,
-            }
-        ]
-    )
+def output_fn(prediction, accept):
+    return json.dumps({"prediction": prediction})
+""")
 
-    try:
-        sm.describe_endpoint(EndpointName=endpoint_name)
-        sm.update_endpoint(
-            EndpointName=endpoint_name,
-            EndpointConfigName=config_name
-        )
-    except:
-        sm.create_endpoint(
-            EndpointName=endpoint_name,
-            EndpointConfigName=config_name
-        )
+os.makedirs("xgb_src", exist_ok=True)
+with open("xgb_src/inference.py", "w") as f:
+    f.write(inference_script)
 
-    return {"status": "OK"}
+print("Wrote xgb_src/inference.py")
