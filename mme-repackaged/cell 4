@@ -62,11 +62,19 @@ def main():
 
         inference_path = args.inference_script
         if not os.path.isabs(inference_path):
-            inference_path = os.path.join(os.getcwd(), inference_path)
+            # Resolve relative to this script location, not the runtime CWD
+            inference_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), inference_path)
+
+        if not os.path.exists(inference_path):
+            raise FileNotFoundError(f"Inference script not found at {inference_path}")
 
         with tarfile.open(args.output_tar, "w:gz") as dst:
             for fname in ("model.xgb", "fe.pkl", "label_encoder.pkl"):
-                dst.add(os.path.join(tmpdir, fname), arcname=fname)
+                full_path = os.path.join(tmpdir, fname)
+                if not os.path.exists(full_path):
+                    raise FileNotFoundError(f"Expected {fname} in extracted model tarball")
+                dst.add(full_path, arcname=fname)
+
             dst.add(inference_path, arcname="code/inference.py")
 
 if __name__ == "__main__":

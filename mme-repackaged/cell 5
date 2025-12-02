@@ -5,6 +5,7 @@
 import boto3
 import sagemaker
 from sagemaker.workflow.pipeline import Pipeline
+from sagemaker.workflow.functions import Join
 from sagemaker.workflow.parameters import ParameterString
 from sagemaker.workflow.pipeline_context import PipelineSession
 from sagemaker.processing import ScriptProcessor, ProcessingInput, ProcessingOutput
@@ -82,8 +83,6 @@ train_steps = {}
 
 for tgt in TARGET_COLS:
 
-    train_input_prefix = f"{SPLIT_PREFIX}/{tgt}"
-
     estimator = XGBoost(
         entry_point="train_xgb.py",
         source_dir=".",   # CRITICAL FOR NOTEBOOK
@@ -96,27 +95,30 @@ for tgt in TARGET_COLS:
         sagemaker_session=pipeline_session
     )
 
+    processed_uri = preprocess_steps[tgt].properties.ProcessingOutputConfig.Outputs["processed"].S3Output.S3Uri
+
     step = TrainingStep(
         name=f"Train_{tgt}",
         estimator=estimator,
         inputs={
             "train_csv": TrainingInput(
-                s3_data=f"{train_input_prefix}/train.csv",
+                s3_data=Join(on="/", values=[processed_uri, "train.csv"]),
                 content_type="text/csv"
             ),
             "val_csv": TrainingInput(
-                s3_data=f"{train_input_prefix}/val.csv",
+                s3_data=Join(on="/", values=[processed_uri, "val.csv"]),
                 content_type="text/csv"
             ),
             "fe_model": TrainingInput(
-                s3_data=f"{train_input_prefix}/fe.pkl",
+                s3_data=Join(on="/", values=[processed_uri, "fe.pkl"]),
                 content_type="application/octet-stream"
             ),
             "label_model": TrainingInput(
-                s3_data=f"{train_input_prefix}/label_encoder.pkl",
+                s3_data=Join(on="/", values=[processed_uri, "label_encoder.pkl"]),
                 content_type="application/octet-stream"
             )
-        }
+        },
+        depends_on=[preprocess_steps[tgt]]
     )
 
     train_steps[tgt] = step
@@ -140,8 +142,7 @@ for tgt in TARGET_COLS:
         source_dir="."  # ensures inference.py is available
     )
 
-    model_output_prefix = f"{TRAIN_PREFIX}/{tgt}"
-    mme_dest_prefix     = f"{MODEL_PREFIX}/{tgt}"
+    mme_dest_prefix = f"{MODEL_PREFIX}/{tgt}"
 
     step = ProcessingStep(
         name=f"Repack_{tgt}",
@@ -149,7 +150,7 @@ for tgt in TARGET_COLS:
         code="repack_for_mme.py",
         inputs=[
             ProcessingInput(
-                source=f"{model_output_prefix}/model.tar.gz",
+                source=train_steps[tgt].properties.ModelArtifacts.S3ModelArtifacts,
                 destination="/opt/ml/processing/input/model"
             ),
         ],
@@ -164,7 +165,8 @@ for tgt in TARGET_COLS:
             "--model_tar", "/opt/ml/processing/input/model/model.tar.gz",
             "--inference_script", "inference.py",
             "--output_tar", "/opt/ml/processing/output/model_mme.tar.gz"
-        ]
+        ],
+        depends_on=[train_steps[tgt]]
     )
 
     repack_steps[tgt] = step
@@ -178,7 +180,7 @@ register_steps = {}
 
 for tgt in TARGET_COLS:
 
-    model_data_uri = f"{MODEL_PREFIX}/{tgt}/model_mme.tar.gz"
+    model_data_uri = repack_steps[tgt].properties.ProcessingOutputConfig.Outputs["mme_tar"].S3Output.S3Uri
 
     model = Model(
         image_uri=sagemaker.image_uris.retrieve("xgboost", region, version="1.3-1"),
@@ -193,6 +195,7 @@ for tgt in TARGET_COLS:
         name=f"Register_{tgt}",
         model=model,
         model_package_group_name=f"{PROJECT_NAME}-{tgt}",
+        depends_on=[repack_steps[tgt]]
     )
 
     register_steps[tgt] = step
