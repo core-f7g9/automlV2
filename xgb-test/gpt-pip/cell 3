@@ -1,20 +1,14 @@
 %%writefile train.py
-import argparse
 import json
 import xgboost as xgb
 import os
 import numpy as np
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--train_path")
-    parser.add_argument("--val_path")
-    parser.add_argument("--model_dir")
-    args = parser.parse_args()
-
-    train_path = args.train_path
-    val_path = args.val_path
-    model_dir = args.model_dir
+    # Fixed SageMaker channel paths for libsvm data
+    train_path = "/opt/ml/input/data/train/train.libsvm"
+    val_path   = "/opt/ml/input/data/val/val.libsvm"
+    model_dir  = "/opt/ml/model"
     os.makedirs(model_dir, exist_ok=True)
 
     # -----------------------------
@@ -30,16 +24,13 @@ def main():
     unique_classes = sorted(set(train_labels))
     num_class = len(unique_classes)
 
+    # Map original label values -> 0..K-1
     class_map = {str(cls): int(i) for i, cls in enumerate(unique_classes)}
-    inv_map = {v: k for k, v in class_map.items()}
 
     # Save class map for inference
     with open(os.path.join(model_dir, "class_map.json"), "w") as f:
         json.dump(class_map, f, indent=2)
 
-    # -----------------------------
-    # Re-map labels to 0..num_class-1
-    # -----------------------------
     def encode_labels(dmat):
         y = dmat.get_label()
         mapped = np.array([class_map[str(lbl)] for lbl in y])
@@ -49,7 +40,7 @@ def main():
     encode_labels(dval)
 
     # -----------------------------
-    # Train model
+    # Train XGBoost multi-class model
     # -----------------------------
     params = {
         "objective": "multi:softprob",
@@ -57,7 +48,7 @@ def main():
         "eval_metric": "mlogloss",
         "tree_method": "hist",
         "max_depth": 8,
-        "eta": 0.2
+        "eta": 0.2,
     }
 
     watchlist = [(dtrain, "train"), (dval, "validation")]
@@ -73,8 +64,7 @@ def main():
     # Save model
     # -----------------------------
     booster.save_model(os.path.join(model_dir, "xgboost-model"))
-
-    print("Training complete!")
+    print("✅ Training complete.")
 
 if __name__ == "__main__":
     main()
