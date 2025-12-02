@@ -1,0 +1,10 @@
+# ============================
+# Cell 7 — Execute Pipeline
+# ============================
+
+execution = pipeline.start()
+
+print("Pipeline execution ARN:", execution.arn)
+
+# Wait for completion (optional)
+execution.wait()

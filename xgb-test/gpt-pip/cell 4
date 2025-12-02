@@ -1,0 +1,39 @@
+%%writefile repack_for_mme.py
+import argparse
+import os
+import tarfile
+import shutil
+
+def pack(source_dir, output_tar):
+    with tarfile.open(output_tar, "w:gz") as tar:
+        tar.add(source_dir, arcname=".")
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--models_dir")
+    parser.add_argument("--preprocess_dir")
+    parser.add_argument("--output_dir")
+    args = parser.parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    for tgt in os.listdir(args.models_dir):
+        tgt_dir = os.path.join(args.models_dir, tgt)
+        if not os.path.isdir(tgt_dir):
+            continue
+
+        packaging_dir = os.path.join(args.output_dir, tgt)
+        os.makedirs(packaging_dir, exist_ok=True)
+
+        shutil.copy(os.path.join(tgt_dir, "xgboost-model"), packaging_dir)
+        shutil.copy(os.path.join(tgt_dir, "class_map.json"), packaging_dir)
+
+        shutil.copy(os.path.join(args.preprocess_dir, "tfidf_vocab.pkl"), packaging_dir)
+        shutil.copy(os.path.join(args.preprocess_dir, "vendor_encoder.pkl"), packaging_dir)
+        shutil.copy(os.path.join(args.preprocess_dir, "club_encoder.pkl"), packaging_dir)
+        shutil.copy("inference.py", packaging_dir)
+
+        pack(packaging_dir, os.path.join(args.output_dir, f"{tgt}.tar.gz"))
+
+if __name__ == "__main__":
+    main()

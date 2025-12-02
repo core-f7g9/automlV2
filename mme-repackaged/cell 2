@@ -77,9 +77,10 @@ def main():
             shuffle=True
         )
 
-    # Label encode target
+    # Label encode target with full data coverage to avoid unseen classes at transform time
     target_le = LabelEncoder()
-    y_train = target_le.fit_transform(df_train[args.target])
+    target_le.fit(df[args.target])
+    y_train = target_le.transform(df_train[args.target])
     y_val   = target_le.transform(df_val[args.target])
 
     os.makedirs(args.output_dir, exist_ok=True)

@@ -1,0 +1,57 @@
+%%writefile inference.py
+import json
+import xgboost as xgb
+import numpy as np
+import pickle
+import os
+
+def model_fn(model_dir):
+    booster = xgb.Booster()
+    booster.load_model(os.path.join(model_dir, "xgboost-model"))
+
+    with open(os.path.join(model_dir, "class_map.json")) as f:
+        class_map = json.load(f)
+
+    with open(os.path.join(model_dir, "tfidf_vocab.pkl"), "rb") as f:
+        vocab = pickle.load(f)
+
+    with open(os.path.join(model_dir, "vendor_encoder.pkl"), "rb") as f:
+        ven_enc = pickle.load(f)
+
+    with open(os.path.join(model_dir, "club_encoder.pkl"), "rb") as f:
+        club_enc = pickle.load(f)
+
+    return {
+        "model": booster,
+        "class_map": class_map,
+        "vocab": vocab,
+        "ven_enc": ven_enc,
+        "club_enc": club_enc
+    }
+
+def input_fn(request_body, request_content_type):
+    return json.loads(request_body)
+
+def predict_fn(data, model_artifacts):
+    booster = model_artifacts["model"]
+
+    # Rebuild vectorizer from vocab
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    vec = TfidfVectorizer(vocabulary=model_artifacts["vocab"])
+
+    line = [data["LineDescription"].lower()]
+    tfidf = vec.fit_transform(line).toarray()
+
+    ven = model_artifacts["ven_enc"].transform([data["VendorName"]])[0]
+    club = model_artifacts["club_enc"].transform([str(data["ClubNumber"])])[0]
+
+    X = np.hstack([[ven, club], tfidf[0]])
+    dmat = xgb.DMatrix(X.reshape(1, -1))
+
+    probs = booster.predict(dmat)[0]
+    idx_to_class = {v: k for k, v in model_artifacts["class_map"].items()}
+    pred = idx_to_class[int(np.argmax(probs))]
+    return {"prediction": pred, "probabilities": probs.tolist()}
+
+def output_fn(prediction, accept):
+    return json.dumps(prediction)

@@ -1,0 +1,85 @@
+# --- Pipeline Parameter setup ---
+data_input_uri = ParameterString(
+    name="DataInputUri",
+    default_value=DATA_INPUT_URI
+)
+
+mme_s3_prefix = ParameterString(
+    name="MmeS3Prefix",
+    default_value=MME_S3_PREFIX
+)
+
+all_targets_str = ParameterString(
+    name="AllTargets",
+    default_value=",".join(TARGET_COLS)
+)
+
+input_features_str = ParameterString(
+    name="InputFeatures",
+    default_value=",".join(INPUT_FEATURES)
+)
+
+# JSON-formatted list of targets for the MapStep to iterate over
+target_fields_list_str = ParameterString(
+    name="TargetFieldsList",
+    default_value=json.dumps(TARGET_COLS)
+)
+
+# --- Estimator Definition ---
+sklearn_estimator = SKLearn(
+    entry_point="train.py",
+    source_dir="./source_code", # Points to the folder containing train.py and requirements.txt
+    role=role,
+    instance_type=INSTANCE_TYPE,
+    framework_version="1.2-1",
+    py_version="py310",
+    hyperparameters={
+        "mme-s3-prefix": mme_s3_prefix,
+        "all-targets": all_targets_str,
+        "input-features": input_features_str,
+    },
+    sagemaker_session=sm_sess,
+)
+
+# --- Training Step Definition ---
+training_step = TrainingStep(
+    name="TrainSingleModel",
+    estimator=sklearn_estimator,
+    inputs={"train": TrainingInput(s3_data=data_input_uri)},
+)
+
+# --- Map Step Definition (Parallelization) ---
+map_step = MapStep(
+    name="TrainAllModelsInParallel",
+    step=training_step,
+    # Use json_parse to turn the ParameterString into a list of items for iteration
+    items=sagemaker.workflow.steps.ExecutionVariables.json_parse(target_fields_list_str), 
+    max_concurrency=4, 
+    # CRITICAL: Pass the current list item (the target column name) as a hyperparameter
+    parameters={
+        training_step.properties.HyperParameters["target-field"]: sagemaker.workflow.steps.ExecutionVariables.MAP_ITEM_VALUE
+    }
+)
+
+# --- Pipeline Definition and Execution ---
+pipeline = Pipeline(
+    name=f"{PROJECT_NAME.replace('-', '')}-MME-Pipeline",
+    parameters=[
+        data_input_uri,
+        mme_s3_prefix,
+        all_targets_str,
+        input_features_str,
+        target_fields_list_str
+    ],
+    steps=[map_step],
+    sagemaker_session=sm_sess,
+)
+
+print(f"Upserting pipeline: {pipeline.name}")
+pipeline.upsert(role_arn=role)
+
+print("\nStarting pipeline execution...")
+execution = pipeline.start()
+print(f"Pipeline started: {execution.arn}")
+# You can check the status on the SageMaker Studio console or wait for it to finish:
+# execution.wait()

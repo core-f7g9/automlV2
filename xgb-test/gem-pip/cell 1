@@ -1,0 +1,49 @@
+import os
+import json
+import boto3
+import sagemaker
+from sagemaker.workflow.pipeline import Pipeline
+from sagemaker.workflow.steps import MapStep, TrainingStep
+from sagemaker.workflow.parameters import ParameterString
+from sagemaker.sklearn.estimator import SKLearn
+from sagemaker.inputs import TrainingInput
+from sagemaker.sklearn.model import SKLearnModel
+from sagemaker.multidatamodel import MultiDataModel
+
+# --- AWS/SageMaker Setup ---
+region = boto3.Session().region_name
+sm_sess = sagemaker.Session()
+role = sagemaker.get_execution_role()
+bucket = sm_sess.default_bucket()
+
+# --- Project Configuration (Your Input) ---
+CLIENT_NAME = "client1"
+PROJECT_NAME = f"{CLIENT_NAME}-manual-ml"
+OUTPUT_PREFIX = "manual-ml"
+
+TARGET_COLS = [
+    "DepartmentCode",
+    "AccountCode",
+    "SubAccountCode",
+    "LocationCode"
+]
+
+INPUT_FEATURES = ["VendorName", "LineDescription", "ClubNumber"]
+
+# --- Refined S3 Paths for MME Solution ---
+# 1. Location where your preprocessed data should be uploaded
+DATA_INPUT_URI = f"s3://{bucket}/{OUTPUT_PREFIX}/train/"
+
+# 2. The SINGLE prefix for all final model artifacts
+MME_S3_PREFIX = f"s3://{bucket}/{OUTPUT_PREFIX}/mme-models/"
+
+# --- Deployment Configuration ---
+ENDPOINT_NAME = f"{PROJECT_NAME.lower().replace('-', '')}-mme"
+INSTANCE_TYPE = "ml.m5.xlarge" # Use a reasonable instance size for training and deployment
+
+print("Region:", region)
+print("Role:", role)
+print("S3 Bucket:", bucket)
+print("Data Input Path (Upload preprocessed data here):", DATA_INPUT_URI)
+print("MME Model Output Path:", MME_S3_PREFIX)
+print("Endpoint Name:", ENDPOINT_NAME)

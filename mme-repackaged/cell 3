@@ -6,6 +6,7 @@ import os
 import pandas as pd
 import xgboost as xgb
 import joblib
+import shutil
 
 def main():
     p = argparse.ArgumentParser()
@@ -14,6 +15,7 @@ def main():
     p.add_argument("--fe_model", default=os.environ.get("SM_CHANNEL_FE_MODEL"))
     p.add_argument("--label_model", default=os.environ.get("SM_CHANNEL_LABEL_MODEL"))
     p.add_argument("--output_dir", default=os.environ.get("SM_MODEL_DIR", "./"))
+    p.add_argument("--inference_script", default="inference.py")
     args = p.parse_args()
 
     for name, path in {
@@ -62,6 +64,16 @@ def main():
     bst.save_model(os.path.join(args.output_dir, "model.xgb"))
     joblib.dump(joblib.load(args.fe_model), os.path.join(args.output_dir, "fe.pkl"))
     joblib.dump(label_enc, os.path.join(args.output_dir, "label_encoder.pkl"))
+
+    # Ensure inference script travels with the model artifact
+    inference_src = args.inference_script
+    if not os.path.isabs(inference_src):
+        inference_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), inference_src)
+
+    if not os.path.exists(inference_src):
+        raise FileNotFoundError(f"Inference script not found at {inference_src}")
+
+    shutil.copy2(inference_src, os.path.join(args.output_dir, "inference.py"))
 
 if __name__ == "__main__":
     main()

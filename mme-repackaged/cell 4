@@ -52,7 +52,7 @@ import tempfile
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model_tar", required=True)
-    p.add_argument("--inference_script", default="inference.py")
+    p.add_argument("--inference_script", default=None)
     p.add_argument("--output_tar", required=True)
     args = p.parse_args()
 
@@ -60,10 +60,18 @@ def main():
         with tarfile.open(args.model_tar, "r:gz") as src:
             src.extractall(tmpdir)
 
-        inference_path = args.inference_script
-        if not os.path.isabs(inference_path):
-            # Resolve relative to this script location, not the runtime CWD
-            inference_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), inference_path)
+        if args.inference_script:
+            inference_path = args.inference_script
+            if not os.path.isabs(inference_path):
+                # Resolve relative to this script location, not the runtime CWD
+                inference_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), inference_path)
+            fallback_path = os.path.join(tmpdir, "inference.py")
+            if not os.path.exists(inference_path) and os.path.exists(fallback_path):
+                # Prefer bundled inference.py from the model artifact if the provided path is missing
+                inference_path = fallback_path
+        else:
+            # Default to inference.py that was bundled into the model artifact during training
+            inference_path = os.path.join(tmpdir, "inference.py")
 
         if not os.path.exists(inference_path):
             raise FileNotFoundError(f"Inference script not found at {inference_path}")

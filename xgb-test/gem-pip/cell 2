@@ -1,0 +1,153 @@
+# Create source code directory and subdirectories
+source_dir = 'source_code'
+code_dir = os.path.join(source_dir, 'code')
+os.makedirs(code_dir, exist_ok=True)
+
+# ----------------------------------------------------
+# 2a. requirements.txt
+# ----------------------------------------------------
+requirements_content = """
+sagemaker-inference
+xgboost
+scikit-learn
+pandas
+boto3
+"""
+with open(os.path.join(source_dir, 'requirements.txt'), 'w') as f:
+    f.write(requirements_content.strip())
+print("Created source_code/requirements.txt")
+
+# ----------------------------------------------------
+# 2b. inference.py (MME Handler with LabelEncoder)
+# ----------------------------------------------------
+inference_content = """
+import joblib
+import os
+import json
+import pandas as pd
+from io import StringIO
+
+def model_fn(model_dir):
+    \"\"\"
+    Loads the model and the encoder from the model_dir.
+    MME calls this when a specific model is loaded.
+    \"\"\"
+    model = joblib.load(os.path.join(model_dir, "model.joblib"))
+    encoder = joblib.load(os.path.join(model_dir, "encoder.joblib"))
+    return {"model": model, "encoder": encoder}
+
+def transform_fn(model_dict, data, content_type, accept_type):
+    \"\"\"
+    Handles input, prediction, and output (critical for decoding labels).
+    \"\"\"
+    # 1. Input Parsing
+    if content_type == "text/csv":
+        input_data = pd.read_csv(StringIO(data), header=None)
+    elif content_type == "application/json":
+        input_data = pd.DataFrame(json.loads(data))
+    else:
+        raise ValueError(f"Unsupported content type: {content_type}")
+
+    # 2. Predict
+    model = model_dict["model"]
+    encoder = model_dict["encoder"]
+    
+    predicted_indices = model.predict(input_data)
+    decoded_predictions = encoder.inverse_transform(predicted_indices)
+
+    # 3. Output Formatting
+    if accept_type == "application/json":
+        return json.dumps(decoded_predictions.tolist()), "application/json"
+    else:
+        # For simplicity, returning CSV/text is omitted, stick to JSON
+        raise ValueError(f"Unsupported accept type: {accept_type}")
+"""
+with open(os.path.join(code_dir, 'inference.py'), 'w') as f:
+    f.write(inference_content.strip())
+print("Created source_code/code/inference.py")
+
+# ----------------------------------------------------
+# 2c. train.py (Parameterized Training and Upload)
+# ----------------------------------------------------
+train_content = f"""
+import argparse
+import os
+import pandas as pd
+import joblib
+import tarfile
+import boto3
+import sagemaker
+
+from sklearn.preprocessing import LabelEncoder
+from xgboost import XGBClassifier
+
+TRAIN_DATA_PATH = os.environ.get("SM_CHANNEL_TRAIN", "/opt/ml/input/data/train")
+MODEL_DIR = os.environ.get("SM_MODEL_DIR", "/opt/ml/model")
+
+def train(args):
+    print(f"--- Training model for target field: {{args.target_field}} ---")
+    
+    # 1. Load data (Assuming one preprocessed CSV file)
+    data_file = os.path.join(TRAIN_DATA_PATH, "invoices_preprocessed.csv")
+    df = pd.read_csv(data_file)
+    
+    # 2. Prepare data
+    input_features_list = args.input_features.split(',')
+    X = df[input_features_list]
+    y_raw = df[args.target_field]
+
+    # 3. Encode Target
+    encoder = LabelEncoder()
+    y = encoder.fit_transform(y_raw)
+    
+    # 4. Train XGBoost Model
+    num_classes = len(encoder.classes_)
+    model = XGBClassifier(
+        objective='multi:softmax',
+        num_class=num_classes,
+        use_label_encoder=False,
+        eval_metric='mlogloss',
+        n_estimators=100
+    )
+    model.fit(X, y)
+
+    # 5. Save model and encoder LOCALLY
+    joblib.dump(model, os.path.join(MODEL_DIR, "model.joblib"))
+    joblib.dump(encoder, os.path.join(MODEL_DIR, "encoder.joblib"))
+    
+    # 6. Package model.tar.gz with unique name (includes inference.py)
+    model_name = f"model-{{args.target_field.replace('_', '-')}}.tar.gz"
+    local_tar_path = os.path.join(MODEL_DIR, model_name)
+    
+    with tarfile.open(local_tar_path, "w:gz") as tar:
+        tar.add(os.path.join(MODEL_DIR, "model.joblib"), arcname="model.joblib")
+        tar.add(os.path.join(MODEL_DIR, "encoder.joblib"), arcname="encoder.joblib")
+        # CRITICAL: The inference script must be included in the code/ path
+        tar.add(os.path.join("code", "inference.py"), arcname="code/inference.py") 
+
+    # 7. Upload to final MME S3 Prefix
+    s3_client = boto3.client("s3")
+    s3_bucket, s3_prefix = sagemaker.utils.parse_s3_url(args.mme_s3_prefix)
+    
+    s3_client.upload_file(
+        local_tar_path,
+        s3_bucket,
+        os.path.join(s3_prefix, model_name)
+    )
+    print("--- Training complete and model uploaded ---")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    
+    parser.add_argument("--target-field", type=str, required=True)
+    parser.add_argument("--mme-s3-prefix", type=str, required=True)
+    parser.add_argument("--all-targets", type=str, required=True)
+    parser.add_argument("--input-features", type=str, required=True)
+    
+    args = parser.parse_args()
+    train(args)
+"""
+with open(os.path.join(source_dir, 'train.py'), 'w') as f:
+    f.write(train_content.strip())
+print("Created source_code/train.py")

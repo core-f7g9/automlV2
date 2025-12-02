@@ -1,0 +1,75 @@
+%%writefile preprocess.py
+import argparse
+import pandas as pd
+import numpy as np
+import os
+import json
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.feature_extraction.text import TfidfVectorizer
+import pickle
+
+def save_pickle(obj, path):
+    with open(path, "wb") as f:
+        pickle.dump(obj, f)
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input_csv", type=str)
+    parser.add_argument("--targets", type=str)
+    parser.add_argument("--output_dir", type=str)
+    parser.add_argument("--tfidf_max_features", type=int, default=5000)
+    args = parser.parse_args()
+
+    df = pd.read_csv(args.input_csv)
+    targets = json.loads(args.targets)  # list of target column names
+
+    # Clean text
+    df["LineDescription"] = df["LineDescription"].astype(str).fillna("").str.lower()
+
+    # Vendor label encoder
+    ven_enc = LabelEncoder()
+    df["VendorName_enc"] = ven_enc.fit_transform(df["VendorName"].astype(str).fillna(""))
+
+    # ClubNumber encoder (numeric or categorical)
+    cb_enc = LabelEncoder()
+    df["ClubNumber_enc"] = cb_enc.fit_transform(df["ClubNumber"].astype(str).fillna(""))
+
+    # Build TF-IDF from LineDescription
+    tfidf = TfidfVectorizer(max_features=args.tfidf_max_features)
+    tfidf_matrix = tfidf.fit_transform(df["LineDescription"])
+
+    # Convert TF-IDF to dense
+    tfidf_dense = tfidf_matrix.toarray()
+
+    # Final numeric frame (but we keep TF-IDF separate)
+    extra_feats = df[["VendorName_enc", "ClubNumber_enc"]].reset_index(drop=True)
+    X_full = np.hstack([extra_feats.values, tfidf_dense])
+
+    # Save TF-IDF vocabulary + encoders
+    save_pickle(tfidf.vocabulary_, os.path.join(args.output_dir, "tfidf_vocab.pkl"))
+    save_pickle(ven_enc, os.path.join(args.output_dir, "vendor_encoder.pkl"))
+    save_pickle(cb_enc, os.path.join(args.output_dir, "club_encoder.pkl"))
+
+    # For each target → create train/val split
+    for tgt in targets:
+        df_sub = df.dropna(subset=[tgt]).reset_index(drop=True)
+        y = df_sub[tgt].astype(str)
+        X = X_full[df_sub.index]
+
+        X_train, X_val, y_train, y_val = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y
+        )
+
+        tgt_dir = os.path.join(args.output_dir, tgt)
+        os.makedirs(tgt_dir, exist_ok=True)
+
+        pd.DataFrame(X_train).assign(label=y_train.values).to_csv(
+            os.path.join(tgt_dir, "train.csv"), index=False
+        )
+        pd.DataFrame(X_val).assign(label=y_val.values).to_csv(
+            os.path.join(tgt_dir, "val.csv"), index=False
+        )
+
+if __name__ == "__main__":
+    main()

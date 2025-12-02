@@ -1,0 +1,32 @@
+import os
+import boto3
+import sagemaker
+from sagemaker.workflow.pipeline import Pipeline
+from sagemaker.workflow.pipeline_context import PipelineSession
+from sagemaker.workflow.steps import ProcessingStep, TrainingStep
+from sagemaker.workflow.parameters import ParameterString
+from sagemaker.processing import ScriptProcessor, ProcessingInput, ProcessingOutput
+from sagemaker.inputs import TrainingInput
+from sagemaker.xgboost.estimator import XGBoost
+from sagemaker.workflow.step_collections import RegisterModel
+from sagemaker.workflow.lambda_step import LambdaStep
+from sagemaker.workflow.model_step import ModelStep
+
+region = boto3.Session().region_name
+sm_session = sagemaker.Session()
+pipeline_session = PipelineSession()
+role = sagemaker.get_execution_role()
+
+BUCKET = sm_session.default_bucket()
+PROJECT_PREFIX = "multi-target-xgb"
+INPUT_S3 = f"s3://{BUCKET}/{PROJECT_PREFIX}/input/data.csv"
+OUTPUT_PREFIX = f"s3://{BUCKET}/{PROJECT_PREFIX}"
+
+TARGET_COLS = ["DepartmentCode", "AccountCode", "SubAccountCode", "LocationCode"]
+INPUT_FEATURES = ["VendorName", "LineDescription", "ClubNumber"]
+
+# TF-IDF max features
+TFIDF_MAX = 5000   # Adjust if needed
+
+print("Region:", region)
+print("Bucket:", BUCKET)
