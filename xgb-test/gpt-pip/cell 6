@@ -140,21 +140,17 @@ step_repack = ProcessingStep(
 )
 
 # -------------------------------
-# MODEL STEP — CREATE MULTI-MODEL CONTAINER
+# MODEL STEP — CREATE MULTI-MODEL MODEL ENTITY
 # -------------------------------
-# NOTE:
-# MME requires specifying Mode="MultiModel"
-# inside the container definition passed to ModelStep
 
 mme_container = {
     "Image": xgb_image,
     "ModelDataUrl": f"s3://{BUCKET}/{mme_output}",
-    "Mode": "MultiModel"  # <-- Correct place for MME flag
+    "Mode": "MultiModel"
 }
 
 step_model = ModelStep(
     name="CreateMMEModel",
-    model=None,
     inputs={"Model": mme_container}
 )
 
