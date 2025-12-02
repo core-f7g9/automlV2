@@ -182,7 +182,7 @@ with open("prepare_per_target_splits.py", "w") as f:
 print("Wrote prepare_per_target_splits.py")
 
 # ============================================================
-# Cell 3: Write SKLearn training/inference script
+# Cell 3: Write SKLearn training/inference script (updated to copy inference.py)
 # ============================================================
 import os, textwrap
 
@@ -193,7 +193,7 @@ import os
 import argparse
 import io
 import json
-from typing import Optional, List, Tuple
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -226,7 +226,7 @@ def process_features(
         other_cols = [c for c in df.columns if c not in num_cols]
 
         text_cols = [c for c in other_cols if "desc" in c.lower()]
-        cat_cols = [c for c in other_cols if c not in text_cols]
+        cat_cols  = [c for c in other_cols if c not in text_cols]
 
         meta = {
             "num_cols": num_cols,
@@ -234,10 +234,10 @@ def process_features(
             "cat_cols": cat_cols,
         }
     else:
-        meta = training_meta
-        num_cols = meta["num_cols"]
+        meta      = training_meta
+        num_cols  = meta["num_cols"]
         text_cols = meta["text_cols"]
-        cat_cols = meta["cat_cols"]
+        cat_cols  = meta["cat_cols"]
 
     # Numeric → sparse
     X_num = sparse.csr_matrix(df[num_cols].fillna(0).to_numpy(dtype=np.float32))
@@ -274,14 +274,14 @@ if __name__ == "__main__":
     train_df = pd.read_csv(os.path.join(train_dir, "train.csv"), low_memory=False)
     val_df   = pd.read_csv(os.path.join(val_dir,  "validation.csv"), low_memory=False)
 
-    y_train = train_df[target_name].astype(str)
+    y_train   = train_df[target_name].astype(str)
     X_train_df = train_df.drop(columns=[target_name])
 
-    y_val = val_df[target_name].astype(str)
+    y_val    = val_df[target_name].astype(str)
     X_val_df = val_df.drop(columns=[target_name])
 
     X_train, fe_meta = process_features(df=X_train_df, is_training=True)
-    X_val, _ = process_features(df=X_val_df, is_training=False, training_meta=fe_meta)
+    X_val, _         = process_features(df=X_val_df, is_training=False, training_meta=fe_meta)
 
     print(f"[train] X_train shape: {X_train.shape}, X_val shape: {X_val.shape}")
 
@@ -310,6 +310,21 @@ if __name__ == "__main__":
     joblib.dump(bundle, os.path.join(model_dir, "model.joblib"))
     print("[train] Saved model bundle to", model_dir)
 
+    # ==============================
+    # NEW: ensure inference.py is in model_dir
+    # ==============================
+    import shutil
+
+    # In SKLearn estimator, source_dir is placed under /opt/ml/code
+    src_inference = os.path.join("/opt/ml/code", "inference.py")
+    dst_inference = os.path.join(model_dir, "inference.py")
+
+    if os.path.exists(src_inference):
+        shutil.copy(src_inference, dst_inference)
+        print(f"[train] Copied inference.py into {model_dir}")
+    else:
+        print(f"[train] WARNING: inference.py not found at {src_inference}")
+
 
 # ============== Inference functions (MME-compatible) ==============
 
@@ -333,9 +348,9 @@ def input_fn(input_data, content_type: str):
 
 
 def predict_fn(data: pd.DataFrame, model_bundle):
-    target = model_bundle["target_name"]
-    fe_meta = model_bundle["fe_meta"]
-    clf = model_bundle["model"]
+    target   = model_bundle["target_name"]
+    fe_meta  = model_bundle["fe_meta"]
+    clf      = model_bundle["model"]
 
     if target in data.columns:
         data = data.drop(columns=[target])
@@ -360,7 +375,7 @@ def output_fn(prediction, accept: str):
 with open("sklearn_src/model_script.py", "w") as f:
     f.write(model_script)
 
-print("Wrote sklearn_src/model_script.py")
+print("Wrote updated sklearn_src/model_script.py")
 
 # ============================================================
 # Cell X: Write inference.py into sklearn_src for MME serving
