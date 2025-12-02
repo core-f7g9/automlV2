@@ -1,75 +1,168 @@
 %%writefile preprocess.py
 import argparse
+import os
+import glob
 import pandas as pd
 import numpy as np
-import os
+import joblib
 import json
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
 from sklearn.feature_extraction.text import TfidfVectorizer
-import pickle
+from sklearn.preprocessing import LabelEncoder
 
-def save_pickle(obj, path):
-    with open(path, "wb") as f:
-        pickle.dump(obj, f)
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input_csv", type=str)
-    parser.add_argument("--targets", type=str)
-    parser.add_argument("--output_dir", type=str)
-    parser.add_argument("--tfidf_max_features", type=int, default=5000)
-    args = parser.parse_args()
+# -----------------------------
+# Parse arguments
+# -----------------------------
+parser = argparse.ArgumentParser()
+parser.add_argument("--input_dir")
+parser.add_argument("--targets")
+parser.add_argument("--input_features")
+parser.add_argument("--output_dir")
+parser.add_argument("--tfidf_max_features")
+args = parser.parse_args()
 
-    df = pd.read_csv(args.input_csv)
-    targets = json.loads(args.targets)  # list of target column names
+targets = json.loads(args.targets)
+input_features = json.loads(args.input_features)
+output_dir = args.output_dir
+tfidf_max = int(args.tfidf_max_features)
 
-    # Clean text
-    df["LineDescription"] = df["LineDescription"].astype(str).fillna("").str.lower()
+os.makedirs(output_dir, exist_ok=True)
 
-    # Vendor label encoder
-    ven_enc = LabelEncoder()
-    df["VendorName_enc"] = ven_enc.fit_transform(df["VendorName"].astype(str).fillna(""))
 
-    # ClubNumber encoder (numeric or categorical)
-    cb_enc = LabelEncoder()
-    df["ClubNumber_enc"] = cb_enc.fit_transform(df["ClubNumber"].astype(str).fillna(""))
+# -----------------------------
+# Auto-detect CSV
+# -----------------------------
+csv_files = glob.glob(os.path.join(args.input_dir, "*.csv"))
+if len(csv_files) == 0:
+    raise FileNotFoundError(f"No CSV found in {args.input_dir}")
 
-    # Build TF-IDF from LineDescription
-    tfidf = TfidfVectorizer(max_features=args.tfidf_max_features)
-    tfidf_matrix = tfidf.fit_transform(df["LineDescription"])
+input_csv = csv_files[0]
+print(f"📄 Using input CSV: {input_csv}")
 
-    # Convert TF-IDF to dense
-    tfidf_dense = tfidf_matrix.toarray()
+df = pd.read_csv(input_csv)
 
-    # Final numeric frame (but we keep TF-IDF separate)
-    extra_feats = df[["VendorName_enc", "ClubNumber_enc"]].reset_index(drop=True)
-    X_full = np.hstack([extra_feats.values, tfidf_dense])
 
-    # Save TF-IDF vocabulary + encoders
-    save_pickle(tfidf.vocabulary_, os.path.join(args.output_dir, "tfidf_vocab.pkl"))
-    save_pickle(ven_enc, os.path.join(args.output_dir, "vendor_encoder.pkl"))
-    save_pickle(cb_enc, os.path.join(args.output_dir, "club_encoder.pkl"))
+# -----------------------------
+# Validate required columns
+# -----------------------------
+missing = [c for c in input_features + targets if c not in df.columns]
+if missing:
+    raise ValueError(f"Dataset missing required columns: {missing}")
 
-    # For each target → create train/val split
-    for tgt in targets:
-        df_sub = df.dropna(subset=[tgt]).reset_index(drop=True)
-        y = df_sub[tgt].astype(str)
-        X = X_full[df_sub.index]
 
-        X_train, X_val, y_train, y_val = train_test_split(
-            X, y, test_size=0.2, random_state=42, stratify=y
-        )
+# -------------------------------------------------
+# Build dynamic feature pipeline + metadata
+# -------------------------------------------------
+feature_frames = []
+feature_pipeline = []     # <-- this will be saved as preprocess_meta.json
+artifacts_to_save = {}
 
-        tgt_dir = os.path.join(args.output_dir, tgt)
-        os.makedirs(tgt_dir, exist_ok=True)
 
-        pd.DataFrame(X_train).assign(label=y_train.values).to_csv(
-            os.path.join(tgt_dir, "train.csv"), index=False
-        )
-        pd.DataFrame(X_val).assign(label=y_val.values).to_csv(
-            os.path.join(tgt_dir, "val.csv"), index=False
-        )
+for feat in input_features:
 
-if __name__ == "__main__":
-    main()
+    col = df[feat]
+
+    # 1. TEXT FEATURE: TF-IDF
+    if col.dtype == object and (
+        "desc" in feat.lower() or "text" in feat.lower() or "line" in feat.lower()
+    ):
+        print(f"🔹 TF-IDF encoding text feature: {feat}")
+
+        vec = TfidfVectorizer(max_features=tfidf_max)
+        X_text = vec.fit_transform(col.fillna("").astype(str))
+
+        feature_frames.append(X_text.toarray())
+
+        # Save vocab → dynamic filename per feature
+        vocab_file = f"tfidf_{feat}.pkl"
+        joblib.dump(vec.vocabulary_, os.path.join(output_dir, vocab_file))
+
+        feature_pipeline.append({
+            "name": feat,
+            "type": "tfidf",
+            "file": vocab_file
+        })
+        continue
+
+
+    # 2. CATEGORICAL FEATURE → LabelEncoder
+    if col.dtype == object:
+        print(f"🔹 Label encoding categorical feature: {feat}")
+
+        enc = LabelEncoder()
+        df[feat] = df[feat].fillna("").astype(str)
+        encoded = enc.fit_transform(df[feat]).reshape(-1, 1)
+
+        feature_frames.append(encoded)
+
+        enc_file = f"labelenc_{feat}.pkl"
+        joblib.dump(enc, os.path.join(output_dir, enc_file))
+
+        feature_pipeline.append({
+            "name": feat,
+            "type": "labelenc",
+            "file": enc_file
+        })
+        continue
+
+
+    # 3. NUMERIC FEATURE
+    print(f"🔹 Numeric feature: {feat}")
+    num = pd.to_numeric(col.fillna(0), errors="coerce").fillna(0).values.reshape(-1, 1)
+    feature_frames.append(num)
+
+    feature_pipeline.append({
+        "name": feat,
+        "type": "numeric"
+    })
+
+
+# -------------------------------------------------
+# Merge feature blocks → final X matrix
+# -------------------------------------------------
+X_full = np.hstack(feature_frames)
+
+# Save metadata for inference
+meta = {
+    "feature_pipeline": feature_pipeline,
+    "targets": targets
+}
+with open(os.path.join(output_dir, "preprocess_meta.json"), "w") as f:
+    json.dump(meta, f, indent=2)
+
+
+# -------------------------------------------------
+# Split per target
+# -------------------------------------------------
+for tgt in targets:
+    print(f"🔧 Processing target: {tgt}")
+
+    df_t = df[df[tgt].notna()].copy()
+    y_t = df_t[tgt].astype(str).values
+
+    # Match rows for X_full
+    mask = df[tgt].notna().values
+    X_t = X_full[mask]
+
+    # Split 80/20
+    n = len(y_t)
+    cut = int(n * 0.8)
+
+    X_train = X_t[:cut]
+    y_train = y_t[:cut]
+
+    X_val = X_t[cut:]
+    y_val = y_t[cut:]
+
+    tgt_dir = os.path.join(output_dir, tgt)
+    os.makedirs(tgt_dir, exist_ok=True)
+
+    train_df = pd.DataFrame(X_train)
+    train_df["label"] = y_train
+    train_df.to_csv(os.path.join(tgt_dir, "train.csv"), index=False)
+
+    val_df = pd.DataFrame(X_val)
+    val_df["label"] = y_val
+    val_df.to_csv(os.path.join(tgt_dir, "val.csv"), index=False)
+
+print("✅ Preprocess complete. Metadata + dynamic features saved.")

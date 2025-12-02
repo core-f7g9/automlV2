@@ -1,56 +1,90 @@
 %%writefile inference.py
 import json
-import xgboost as xgb
 import numpy as np
-import pickle
+import xgboost as xgb
 import os
+import pickle
+from sklearn.feature_extraction.text import TfidfVectorizer
 
 def model_fn(model_dir):
+
+    # load boosted model
     booster = xgb.Booster()
     booster.load_model(os.path.join(model_dir, "xgboost-model"))
 
+    # load class map
     with open(os.path.join(model_dir, "class_map.json")) as f:
         class_map = json.load(f)
 
-    with open(os.path.join(model_dir, "tfidf_vocab.pkl"), "rb") as f:
-        vocab = pickle.load(f)
+    # load preprocess metadata
+    meta_path = os.path.join(model_dir, "preprocess_meta.json")
+    with open(meta_path) as f:
+        meta = json.load(f)
 
-    with open(os.path.join(model_dir, "vendor_encoder.pkl"), "rb") as f:
-        ven_enc = pickle.load(f)
+    feature_pipeline = meta["feature_pipeline"]
 
-    with open(os.path.join(model_dir, "club_encoder.pkl"), "rb") as f:
-        club_enc = pickle.load(f)
+    # load artifacts dynamically
+    artifacts = {}
+    for step in feature_pipeline:
+        if step["type"] == "tfidf":
+            with open(os.path.join(model_dir, step["file"]), "rb") as f:
+                vocab = pickle.load(f)
+            artifacts[step["name"]] = {"type": "tfidf", "vocab": vocab}
+
+        elif step["type"] == "labelenc":
+            with open(os.path.join(model_dir, step["file"]), "rb") as f:
+                enc = pickle.load(f)
+            artifacts[step["name"]] = {"type": "labelenc", "encoder": enc}
+
+        else:
+            artifacts[step["name"]] = {"type": "numeric"}
 
     return {
         "model": booster,
         "class_map": class_map,
-        "vocab": vocab,
-        "ven_enc": ven_enc,
-        "club_enc": club_enc
+        "pipeline": feature_pipeline,
+        "artifacts": artifacts
     }
 
 def input_fn(request_body, request_content_type):
     return json.loads(request_body)
 
 def predict_fn(data, model_artifacts):
+
+    pipeline = model_artifacts["pipeline"]
+    artifacts = model_artifacts["artifacts"]
     booster = model_artifacts["model"]
 
-    # Rebuild vectorizer from vocab
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    vec = TfidfVectorizer(vocabulary=model_artifacts["vocab"])
+    feature_values = []
 
-    line = [data["LineDescription"].lower()]
-    tfidf = vec.fit_transform(line).toarray()
+    for step in pipeline:
+        name = step["name"]
+        ftype = artifacts[name]["type"]
 
-    ven = model_artifacts["ven_enc"].transform([data["VendorName"]])[0]
-    club = model_artifacts["club_enc"].transform([str(data["ClubNumber"])])[0]
+        raw_val = data[name]
 
-    X = np.hstack([[ven, club], tfidf[0]])
-    dmat = xgb.DMatrix(X.reshape(1, -1))
+        if ftype == "tfidf":
+            vocab = artifacts[name]["vocab"]
+            vec = TfidfVectorizer(vocabulary=vocab)
+            X = vec.fit_transform([str(raw_val)]).toarray()[0]
+            feature_values.append(X)
+
+        elif ftype == "labelenc":
+            enc = artifacts[name]["encoder"]
+            val = enc.transform([str(raw_val)])[0]
+            feature_values.append(np.array([val]))
+
+        else:  # numeric
+            val = float(raw_val)
+            feature_values.append(np.array([val]))
+
+    X_full = np.hstack(feature_values)
+    dmat = xgb.DMatrix(X_full.reshape(1, -1))
 
     probs = booster.predict(dmat)[0]
     idx_to_class = {v: k for k, v in model_artifacts["class_map"].items()}
     pred = idx_to_class[int(np.argmax(probs))]
+
     return {"prediction": pred, "probabilities": probs.tolist()}
 
 def output_fn(prediction, accept):

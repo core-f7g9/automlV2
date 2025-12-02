@@ -3,6 +3,7 @@ import argparse
 import os
 import tarfile
 import shutil
+import glob
 
 def pack(source_dir, output_tar):
     with tarfile.open(output_tar, "w:gz") as tar:
@@ -17,23 +18,38 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
+    # collect preprocess artifacts dynamically
+    preprocess_artifacts = glob.glob(os.path.join(args.preprocess_dir, "*.pkl"))
+    meta_file = os.path.join(args.preprocess_dir, "preprocess_meta.json")
+
     for tgt in os.listdir(args.models_dir):
-        tgt_dir = os.path.join(args.models_dir, tgt)
-        if not os.path.isdir(tgt_dir):
+        tgt_model_dir = os.path.join(args.models_dir, tgt)
+        if not os.path.isdir(tgt_model_dir):
             continue
 
         packaging_dir = os.path.join(args.output_dir, tgt)
         os.makedirs(packaging_dir, exist_ok=True)
 
-        shutil.copy(os.path.join(tgt_dir, "xgboost-model"), packaging_dir)
-        shutil.copy(os.path.join(tgt_dir, "class_map.json"), packaging_dir)
+        # copy model files
+        shutil.copy(os.path.join(tgt_model_dir, "xgboost-model"), packaging_dir)
+        shutil.copy(os.path.join(tgt_model_dir, "class_map.json"), packaging_dir)
 
-        shutil.copy(os.path.join(args.preprocess_dir, "tfidf_vocab.pkl"), packaging_dir)
-        shutil.copy(os.path.join(args.preprocess_dir, "vendor_encoder.pkl"), packaging_dir)
-        shutil.copy(os.path.join(args.preprocess_dir, "club_encoder.pkl"), packaging_dir)
+        # copy preprocess artifacts (dynamic)
+        for art in preprocess_artifacts:
+            shutil.copy(art, packaging_dir)
+
+        # copy metadata
+        if os.path.exists(meta_file):
+            shutil.copy(meta_file, packaging_dir)
+
+        # copy inference script
         shutil.copy("inference.py", packaging_dir)
 
-        pack(packaging_dir, os.path.join(args.output_dir, f"{tgt}.tar.gz"))
+        # create tar.gz
+        pack(
+            packaging_dir,
+            os.path.join(args.output_dir, f"{tgt}.tar.gz")
+        )
 
 if __name__ == "__main__":
     main()

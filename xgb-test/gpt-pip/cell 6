@@ -1,5 +1,5 @@
 # ============================
-# Cell 6 — Final Pipeline (Ends at RepackModelsForMME)
+# Cell 6 — Fully Updated Dynamic Pipeline (Final)
 # ============================
 
 import os
@@ -31,20 +31,25 @@ preprocess_output = f"{PROJECT_PREFIX}/processing"
 step_preprocess = ProcessingStep(
     name="PreprocessData",
     processor=processor,
-    inputs=[ProcessingInput(
-        input_name="raw_data",
-        source=INPUT_S3,
-        destination="/opt/ml/processing/input"
-    )],
-    outputs=[ProcessingOutput(
-        output_name="proc_output",
-        source="/opt/ml/processing/output",
-        destination=f"s3://{BUCKET}/{preprocess_output}"
-    )],
+    inputs=[
+        ProcessingInput(
+            input_name="raw_data",
+            source=INPUT_S3,             # <-- dynamic CSV path from cell 1
+            destination="/opt/ml/processing/input"
+        )
+    ],
+    outputs=[
+        ProcessingOutput(
+            output_name="proc_output",
+            source="/opt/ml/processing/output",
+            destination=f"s3://{BUCKET}/{preprocess_output}"
+        )
+    ],
     code="preprocess.py",
     job_arguments=[
-        "--input_csv", "/opt/ml/processing/input/data.csv",
+        "--input_dir", "/opt/ml/processing/input",
         "--targets", json.dumps(TARGET_COLS),
+        "--input_features", json.dumps(INPUT_FEATURES),
         "--output_dir", "/opt/ml/processing/output",
         "--tfidf_max_features", "5000",
     ]
@@ -56,11 +61,10 @@ preprocess_s3_uri = (
 )
 
 # --------------------------------------------------
-# TRAINING STEPS (1 PER TARGET)
+# TRAINING STEPS
 # --------------------------------------------------
 models_output = f"{PROJECT_PREFIX}/trained-models"
 train_steps = {}
-
 xgb_image = sagemaker.image_uris.retrieve("xgboost", region, version="1.5-1")
 
 for tgt in TARGET_COLS:
@@ -90,7 +94,7 @@ for tgt in TARGET_COLS:
     train_steps[tgt] = step_train
 
 # --------------------------------------------------
-# REPACK FOR MME (depends on ALL training steps)
+# REPACK STEP
 # --------------------------------------------------
 mme_output = f"{PROJECT_PREFIX}/mme-packaged"
 
@@ -102,23 +106,18 @@ repack_processor = ScriptProcessor(
     instance_count=1
 )
 
-all_model_artifacts = [
-    train_steps[tgt].properties.ModelArtifacts.S3ModelArtifacts
-    for tgt in TARGET_COLS
-]
-
 step_repack = ProcessingStep(
     name="RepackModelsForMME",
     processor=repack_processor,
     inputs=[
         ProcessingInput(
             input_name="models_dir",
-            source=f"s3://{BUCKET}/{models_output}",
+            source=f"s3://{BUCKET}/{models_output}",  # ALL trained models in one folder
             destination="/opt/ml/processing/models"
         ),
         ProcessingInput(
             input_name="preprocess_dir",
-            source=preprocess_s3_uri,
+            source=preprocess_s3_uri,                  # metadata + pkl files
             destination="/opt/ml/processing/preprocess"
         ),
         ProcessingInput(
@@ -139,13 +138,13 @@ step_repack = ProcessingStep(
 )
 
 # --------------------------------------------------
-# FINAL PIPELINE — NO MME MODEL HERE
+# FINAL PIPELINE (No model creation inside pipeline)
 # --------------------------------------------------
 pipeline = Pipeline(
     name="MultiTargetXGBPipeline",
     steps=[step_preprocess] + list(train_steps.values()) + [step_repack],
-    sagemaker_session=pipeline_session,
+    sagemaker_session=pipeline_session
 )
 
 pipeline.upsert(role_arn=role)
-print("🎉 Pipeline Created Successfully (Ends at RepackModelsForMME)")
+print("🎉 Fully Dynamic Pipeline Created Successfully!")
