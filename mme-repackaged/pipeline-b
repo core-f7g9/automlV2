@@ -1,35 +1,33 @@
+import boto3
 from sagemaker.lambda_helper import Lambda
-from sagemaker.workflow.lambda_step import LambdaStep, LambdaOutput, LambdaOutputTypeEnum
+from sagemaker.workflow.lambda_step import LambdaStep
+from sagemaker.workflow.pipeline import Pipeline
 
 deploy_lambda = Lambda(
     function_name=f"{PROJECT_NAME}-deploy-mme",
     execution_role_arn=role_arn,
     script="deploy_mme_lambda.py",
-    handler="deploy_mme_lambda.handler",
+    handler="handler",
     timeout=900,
     memory_size=512,
 )
 
-targets_csv = ",".join(TARGET_COLS)
-mme_prefix = f"s3://{BUCKET}/{OUTPUT_PREFIX}/mme/{CLIENT_NAME}/models/"
-
 deploy_step = LambdaStep(
-    name="DeployMME_XGBoost",
+    name="DeployMME",
     lambda_func=deploy_lambda,
     inputs={
-        "EndpointName": f"{PROJECT_NAME}-mme-endpoint",
-        "ModelsPrefix": mme_prefix,
         "ClientName": CLIENT_NAME,
-        "TargetsCSV": targets_csv,
+        "TargetsCSV": ",".join(TARGET_COLS),
+        "ModelsPrefix": f"s3://{BUCKET}/{OUTPUT_PREFIX}/mme/{CLIENT_NAME}/models/",
+        "EndpointName": f"{CLIENT_NAME}-mme-endpoint",
         "InstanceType": "ml.m5.large",
-        "InstanceCount": "1",
+        "InstanceCount": 1,
         "ExecRoleArn": role_arn,
-    },
-    outputs=[LambdaOutput("status", LambdaOutputTypeEnum.String)]
+    }
 )
 
 pipeline_b = Pipeline(
-    name=f"{PROJECT_NAME}-pipeline-deploy-mme",
+    name=f"{PROJECT_NAME}-pipeline-B",
     parameters=[],
     steps=[deploy_step],
     sagemaker_session=p_sess,
