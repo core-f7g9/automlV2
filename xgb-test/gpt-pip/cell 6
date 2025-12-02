@@ -27,7 +27,7 @@ mme_output = f"{PROJECT_PREFIX}/mme-packaged"
 
 # ---------- PREPROCESSING STEP ----------
 processor = ScriptProcessor(
-    image_uri=sagemaker.image_uris.retrieve("sklearn", region),
+    image_uri=sagemaker.image_uris.retrieve("sklearn", region, version="1.2-1"),
     role=role,
     command=["python3"],
     instance_type="ml.m5.xlarge",
@@ -96,7 +96,7 @@ for tgt in TARGET_COLS:
 
 # ---------- REPACK STEP (MME PACKAGING) ----------
 repack_processor = ScriptProcessor(
-    image_uri=sagemaker.image_uris.retrieve("sklearn", region),
+    image_uri=sagemaker.image_uris.retrieve("sklearn", region, version="1.2-1"),
     role=role,
     command=["python3"],
     instance_type="ml.m5.xlarge",
