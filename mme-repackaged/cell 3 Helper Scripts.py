@@ -1,156 +1,197 @@
 # ============================================================
-# Cell 3 — Create all helper scripts: Lambda + repack + inference
+# Cell 3: Write all helper scripts for AutoML + best-candidate extraction + MME repack
 # ============================================================
-
-import os
 import textwrap
 
-# ============================================================
-# 1) Lambda: launch AutoML V1 job and return best model artifact
-# ============================================================
-automl_lambda_code = textwrap.dedent("""
-import json, time, boto3, os
+# ------------------------------------------------------------
+# Script 1: run_automl_xgb.py 
+# ------------------------------------------------------------
+run_automl = textwrap.dedent("""
+import boto3, json, time, argparse, os
 
-sm = boto3.client("sagemaker")
-
-def handler(event, context):
-    config = event["automl_config"]
-    name   = config["AutoMLJobName"]
-
-    # Submit
-    sm.create_auto_ml_job(**config)
-
-    # Poll until finished
+def wait(sm, job_name):
+    print(f"[INFO] Waiting for AutoML job: {job_name}")
     while True:
-        desc = sm.describe_auto_ml_job(AutoMLJobName=name)
-        status = desc["AutoMLJobStatus"]
-        if status in ("Completed","Failed","Stopped"):
-            break
-        time.sleep(20)
+        resp = sm.describe_auto_ml_job(AutoMLJobName=job_name)
+        status = resp["AutoMLJobStatus"]
+        sec = resp["AutoMLJobSecondaryStatus"]
+        print(f"  Status: {status} / {sec}")
+        if status in ("Failed","Stopped"):
+            raise RuntimeError(f"AutoML job {job_name} failed.")
+        if status == "Completed":
+            print("[INFO] AutoML Completed.")
+            return resp
+        time.sleep(30)
 
-    if status != "Completed":
-        raise Exception(f"AutoML failed with status {status}")
+def get_best_candidate(desc):
+    cands = desc.get("BestCandidate", None)
+    if not cands:
+        raise RuntimeError("No BestCandidate found in AutoML response.")
+    return cands
 
-    best = desc["BestCandidate"]
-    model_artifact = best["InferenceContainers"][0]["ModelDataUrl"]
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--job_name", type=str, required=True)
+    p.add_argument("--train_s3_uri", type=str, required=True)
+    p.add_argument("--target_col", type=str, required=True)
+    p.add_argument("--role_arn", type=str, required=True)
+    p.add_argument("--output_prefix", type=str, required=True)
+    args = p.parse_args()
 
-    return {
-        "best_model_artifact": model_artifact,
-        "candidate_name": best["CandidateName"]
+    sm = boto3.client("sagemaker")
+
+    # Force AutoML to XGBoost only
+    cfg = {
+        "CompletionCriteria": {
+            "MaxCandidates": 5,
+            "MaxAutoMLJobRuntimeInSeconds": 3600
+        },
+        "SecurityConfig": {},
+        "AlgorithmsConfig": [
+            {"AutoMLAlgorithms": ["XGBOOST"]}
+        ]
     }
+
+    print("[INFO] Starting AutoML XGBoost-only job:", args.job_name)
+
+    sm.create_auto_ml_job(
+        AutoMLJobName=args.job_name,
+        AutoMLJobConfig=cfg,
+        InputDataConfig=[
+            {
+                "DataSource": {
+                    "S3DataSource": {
+                        "S3DataType": "S3Prefix",
+                        "S3Uri": args.train_s3_uri
+                    }
+                },
+                "TargetAttributeName": args.target_col
+            }
+        ],
+        OutputDataConfig={"S3OutputPath": args.output_prefix},
+        RoleArn=args.role_arn,
+        ProblemType="MulticlassClassification"
+    )
+
+    desc = wait(sm, args.job_name)
+    best = get_best_candidate(desc)
+
+    # Save best candidate JSON
+    out_path = "best_candidate.json"
+    with open(out_path, "w") as f:
+        json.dump(best, f)
+    print("[INFO] Wrote best_candidate.json")
+
+    # Pass path to pipeline
+    print(out_path)
+
+if __name__ == "__main__":
+    main()
 """).strip()
 
-with open("lambda_launch_automl.py", "w") as f:
-    f.write(automl_lambda_code)
+with open("run_automl_xgb.py", "w") as f:
+    f.write(run_automl)
 
-print("Wrote lambda_launch_automl.py")
 
-# ============================================================
-# 2) Lambda: perform repack for MME (copies artifact + adds inference.py)
-# ============================================================
-repack_lambda_code = textwrap.dedent("""
-import json, tarfile, boto3, os, tempfile, shutil
+# ------------------------------------------------------------
+# Script 2: extract_best_candidate.py
+# ------------------------------------------------------------
+extract_best = textwrap.dedent("""
+import boto3, json, argparse, os
 
-s3 = boto3.client("s3")
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--best_json", type=str, required=True)
+    args = p.parse_args()
 
-def handler(event, context):
-    model_s3 = event["model_artifact"]
-    target   = event["target"]
+    with open(args.best_json, "r") as f:
+        best = json.load(f)
 
-    # Parse S3 URI
-    assert model_s3.startswith("s3://")
-    _, _, bucket_key = model_s3.partition("s3://")
-    bucket, _, key = bucket_key.partition("/")
+    model_artifact = best["InferenceContainers"][0]["ModelDataUrl"]
+    image_uri      = best["InferenceContainers"][0]["Image"]
 
-    # Download original artifact
-    tmp = tempfile.mkdtemp()
-    local_tar = os.path.join(tmp, "model.tar.gz")
-    s3.download_file(bucket, key, local_tar)
+    # Write to text files for downstream step
+    with open("model_artifact.txt","w") as f:
+        f.write(model_artifact)
+    with open("image_uri.txt","w") as f:
+        f.write(image_uri)
 
-    # Extract
-    extract_dir = os.path.join(tmp, "extracted")
-    os.makedirs(extract_dir, exist_ok=True)
-    with tarfile.open(local_tar, "r:gz") as t:
-        t.extractall(extract_dir)
+    print("model_artifact.txt")
+    print("image_uri.txt")
 
-    # Copy inference.py into artifact root
-    shutil.copy("/opt/ml/processing/input/code/inference.py",
-                os.path.join(extract_dir, "inference.py"))
-
-    # Repack new tar
-    repacked_tar = os.path.join(tmp, "repacked.tar.gz")
-    with tarfile.open(repacked_tar, "w:gz") as t:
-        for root, dirs, files in os.walk(extract_dir):
-            for f in files:
-                fp = os.path.join(root, f)
-                arc = os.path.relpath(fp, extract_dir)
-                t.add(fp, arcname=arc)
-
-    # Upload new tar
-    out_key = f"mlops/repacked/{target}/model.tar.gz"
-    s3.upload_file(repacked_tar, bucket, out_key)
-
-    out_uri = f"s3://{bucket}/{out_key}"
-    return {"repacked_artifact": out_uri}
+if __name__ == "__main__":
+    main()
 """).strip()
 
-with open("lambda_repack_mme.py", "w") as f:
-    f.write(repack_lambda_code)
+with open("extract_best_candidate.py","w") as f:
+    f.write(extract_best)
 
-print("Wrote lambda_repack_mme.py")
 
-# ============================================================
-# 3) inference.py — generic script required by MME & AutoGluon
-# ============================================================
-inference_code = textwrap.dedent("""
-import os
-import pickle
-import json
+# ------------------------------------------------------------
+# Script 3: inference.py (generic handler)
+# ------------------------------------------------------------
+inference_script = textwrap.dedent("""
+import os, json, pickle
 import numpy as np
 import pandas as pd
-import xgboost as xgb
-
-# Generic inference handler so MME loads the correct model
-# and supports text input via CSV-like payload.
 
 def model_fn(model_dir):
-    # XGBoost model expected at model.xgboost or similar
-    # AutoML V1 XGB artifacts use 'model.pkl'
-    model_path = os.path.join(model_dir, "model.pkl")
-    if not os.path.exists(model_path):
-        alt = os.path.join(model_dir, "model.xgboost")
-        if os.path.exists(alt):
-            model_path = alt
-    with open(model_path, "rb") as f:
-        model = pickle.load(f)
+    # Load XGBoost or sklearn model
+    import joblib
+    model = joblib.load(os.path.join(model_dir, "model.joblib"))
     return model
 
-def input_fn(raw, content_type):
-    if content_type == "text/csv":
-        df = pd.read_csv(pd.compat.StringIO(raw))
-        return df
-    raise ValueError("Unsupported content type: {}".format(content_type))
+def input_fn(request_body, request_content_type):
+    if request_content_type == "application/json":
+        data = json.loads(request_body)
+        return pd.DataFrame(data)
+    raise ValueError("Unsupported content type: {}".format(request_content_type))
 
-def predict_fn(data, model):
-    # AutoGluon XGB wrapper supports model.predict_proba
-    preds = model.predict_proba(data)
-    out = preds.tolist()
-    return out
+def predict_fn(input_data, model):
+    preds = model.predict(input_data)
+    return preds
 
-def output_fn(prediction, accept):
-    return json.dumps(prediction)
+def output_fn(prediction, response_content_type):
+    if response_content_type == "application/json":
+        return json.dumps(prediction.tolist())
+    raise ValueError("Unsupported response content type: {}".format(response_content_type))
 """).strip()
 
-with open("inference.py", "w") as f:
-    f.write(inference_code)
+with open("inference.py","w") as f:
+    f.write(inference_script)
 
-print("Wrote inference.py")
 
-# ============================================================
-# 4) Store all scripts inside a folder for lambda packaging
-# ============================================================
-os.makedirs("lambda_code", exist_ok=True)
-shutil_cmd = "cp lambda_launch_automl.py lambda_code/; cp lambda_repack_mme.py lambda_code/"
-os.system(shutil_cmd)
+# ------------------------------------------------------------
+# Script 4: repack_for_mme.py
+# ------------------------------------------------------------
+repack = textwrap.dedent("""
+import tarfile, argparse, os, shutil
 
-print("Finished Cell 3 script generation.")
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--model_artifact", type=str, required=True)
+    p.add_argument("--inference_script", type=str, default="inference.py")
+    args = p.parse_args()
+
+    # Extract AutoML model tar
+    os.makedirs("model", exist_ok=True)
+    with tarfile.open(args.model_artifact, "r:gz") as t:
+        t.extractall("model")
+
+    # Copy inference script
+    shutil.copy(args.inference_script, "model/inference.py")
+
+    # Repack for MME
+    out_path = "model_mme.tar.gz"
+    with tarfile.open(out_path, "w:gz") as t:
+        t.add("model", arcname=".")
+    print(out_path)
+
+if __name__ == "__main__":
+    main()
+""").strip()
+
+with open("repack_for_mme.py","w") as f:
+    f.write(repack)
+
+print("Scripts written: run_automl_xgb.py, extract_best_candidate.py, inference.py, repack_for_mme.py")

@@ -1,28 +1,63 @@
-# ============================
+# =========================
 # Cell 1: Setup variables
-# ============================
-
+# =========================
 import os
 import boto3
 import sagemaker
-from sagemaker.workflow.pipeline_context import PipelineSession
+from urllib.parse import urlparse
+from botocore.exceptions import ClientError
 
 region   = boto3.Session().region_name
 sm_sess  = sagemaker.Session()
-p_sess   = PipelineSession()
-role_arn = sagemaker.get_execution_role()
+role_arn = sagemaker.get_execution_role()  # OK in SageMaker Studio
 
+# ---- Client/project knobs
 CLIENT_NAME   = "client1"
-PROJECT_NAME  = f"{CLIENT_NAME}-xgb-hybridtfidf"
+PROJECT_NAME  = f"{CLIENT_NAME}-mme-sklearn"
 OUTPUT_PREFIX = "mlops"
 
-BUCKET        = sm_sess.default_bucket()
-INPUT_S3CSV   = f"s3://{BUCKET}/input/data.csv"
+# ---- Data locations
+BUCKET       = sm_sess.default_bucket()                 # or set your own
+INPUT_S3CSV  = f"s3://{BUCKET}/input/data.csv"         # must exist; header present
+DATA_PREFIX  = f"s3://{BUCKET}/{OUTPUT_PREFIX}"
 
+# ---- Targets (edit per client)
 TARGET_COLS    = ["DepartmentCode", "AccountCode", "SubAccountCode", "LocationCode"]
-INPUT_FEATURES = ["VendorName", "LineDescription", "ClubNumber"]  # numeric treated as text
 
+# ---- Inputs (the only features that will be kept)
+# (You can change these per-client; pipeline takes them as a parameterized string)
+INPUT_FEATURES = ["VendorName", "LineDescription", "ClubNumber"]
+
+# ---- Split policy (tunable per client)
+VAL_FRAC_DEFAULT        = 0.20
+MIN_SUPPORT_DEFAULT     = 5
+RARE_TRAIN_ONLY_DEFAULT = True
+
+def _parse_s3(uri: str):
+    if not uri.startswith("s3://"):
+        raise ValueError(f"Expected s3:// URI, got: {uri}")
+    p = urlparse(uri)
+    bucket = p.netloc
+    key = p.path.lstrip("/")
+    if not bucket or not key:
+        raise ValueError(f"Malformed S3 URI: {uri}")
+    return bucket, key
+
+# Quick sanity check that the CSV exists
+s3 = boto3.client("s3", region_name=region)
+csv_bucket, csv_key = _parse_s3(INPUT_S3CSV)
+try:
+    s3.head_object(Bucket=csv_bucket, Key=csv_key)
+except ClientError as e:
+    code = e.response.get("Error", {}).get("Code", "")
+    if code in ("404", "NoSuchKey", "NotFound"):
+        raise FileNotFoundError(f"CSV not found at {INPUT_S3CSV}. Upload your file or fix the path.") from e
+    raise RuntimeError(f"Could not access {INPUT_S3CSV}: {e}") from e
+
+print("Region:", region)
+print("Role:", role_arn)
 print("Bucket:", BUCKET)
 print("Input CSV:", INPUT_S3CSV)
-print("Role:", role_arn)
-print("Region:", region)
+print("Targets:", TARGET_COLS)
+print("Input features:", INPUT_FEATURES)
+print("Project:", PROJECT_NAME, "| Output prefix:", OUTPUT_PREFIX)
