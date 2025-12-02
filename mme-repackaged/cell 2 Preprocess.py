@@ -1,118 +1,131 @@
-# ============================================================
-# Cell 2: Write processing script — independent per-target splits
-# ============================================================
-import textwrap, os
+import textwrap
 
-split_script = textwrap.dedent("""
-import argparse, os, glob
+preprocess_code = textwrap.dedent("""
+import argparse
+import os
 import pandas as pd
 import numpy as np
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+import joblib
 
-def find_input_csv(mounted_dir: str) -> str:
-    candidates = glob.glob(os.path.join(mounted_dir, "*.csv"))
-    if len(candidates) == 1:
-        return candidates[0]
-    fallback = os.path.join(mounted_dir, "data.csv")
-    if os.path.exists(fallback):
-        return fallback
-    if candidates:
-        return sorted(candidates)[0]
-    raise FileNotFoundError(f"No CSV found under {mounted_dir}. Ensure your S3 object ends with .csv")
+def build_fe_pipeline(cat_cols, text_cols, num_cols):
 
-def per_target_split(df, target_col, input_feats, val_frac=0.2, seed=42, min_support=5, rare_train_only=True):
-    # Drop rows with missing target
-    df_t = df[~df[target_col].isna()].copy()
-    df_t[target_col] = df_t[target_col].astype(str)
+    transformers = []
 
-    counts = df_t[target_col].value_counts(dropna=False)
-    rng = np.random.RandomState(seed)
+    if cat_cols:
+        transformers.append(("cat_label", LabelEncoderTransformer(cat_cols), cat_cols))
 
-    train_idx = []
-    val_idx = []
+    if text_cols:
+        transformers.append(("text_tfidf", TfidfVectorizerTransformer(text_cols), text_cols))
 
-    for cls, g in df_t.groupby(target_col):
-        n = len(g)
-        if n < min_support and rare_train_only:
-            train_idx.extend(g.index.tolist())
-            continue
+    if num_cols:
+        transformers.append(("num_scale", StandardScaler(), num_cols))
 
-        n_val = int(round(n * val_frac))
-        n_val = min(n_val, n - 1) if n > 1 else 0
-        if n_val <= 0:
-            train_idx.extend(g.index.tolist())
-        else:
-            val_take = rng.choice(g.index.values, size=n_val, replace=False)
-            val_idx.extend(val_take.tolist())
-            train_idx.extend(sorted(set(g.index.values) - set(val_take)))
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("vendor_label", LabelEncoderTransformer(["VendorName"]), ["VendorName"]),
+            ("line_tfidf", TfidfVectorizerTransformer(["LineDescription"]), "LineDescription"),
+            ("num_scale", StandardScaler(), ["ClubNumber"])
+        ],
+        remainder="drop"
+    )
 
-    train = df_t.loc[sorted(train_idx)]
-    val   = df_t.loc[sorted(val_idx)]
+    return preprocessor
 
-    keep_cols = list(input_feats) + [target_col]
-    train = train[keep_cols]
-    val   = val[keep_cols]
 
-    # Try to ensure at least 2 classes in train if possible
-    if train[target_col].nunique(dropna=True) < 2 and counts.nunique() > 1:
-        val_groups = val.groupby(target_col)
-        for cls, g in val_groups:
-            if cls not in set(train[target_col].unique()):
-                idx = g.index[0]
-                train = pd.concat([train, val.loc[[idx]]], axis=0)
-                val = val.drop(index=[idx])
-                if train[target_col].nunique(dropna=True) >= 2:
-                    break
+class LabelEncoderTransformer:
+    def __init__(self, columns):
+        self.columns = columns
+        self.encoders = {}
 
-    return train, val
+    def fit(self, X, y=None):
+        for col in self.columns:
+            le = LabelEncoder()
+            X[col] = X[col].astype(str).fillna("Unknown")
+            le.fit(X[col])
+            self.encoders[col] = le
+        return self
+
+    def transform(self, X):
+        out = []
+        for col in self.columns:
+            out.append(self.encoders[col].transform(X[col].astype(str).fillna("Unknown")))
+        return np.array(out).T
+
+
+class TfidfVectorizerTransformer:
+    def __init__(self, columns):
+        self.columns = columns
+        self.vectorizers = {}
+
+    def fit(self, X, y=None):
+        for col in self.columns:
+            tf = TfidfVectorizer(max_features=5000)
+            tf.fit(X[col].astype(str).fillna(""))
+            self.vectorizers[col] = tf
+        return self
+
+    def transform(self, X):
+        out = []
+        for col in self.columns:
+            vec = self.vectorizers[col].transform(X[col].astype(str).fillna("")).toarray()
+            out.append(vec)
+        return np.hstack(out)
+
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--targets_csv", type=str, required=True)
-    p.add_argument("--input_features_csv", type=str, required=True)
-    p.add_argument("--val_frac", type=float, default=0.2)
-    p.add_argument("--random_seed", type=int, default=42)
-    p.add_argument("--min_support", type=int, default=5)
-    p.add_argument("--rare_train_only", type=str, default="true")
-    p.add_argument("--mounted_input_dir", type=str, default="/opt/ml/processing/input")
-    p.add_argument("--output_dir", type=str, default="/opt/ml/processing/output")
+    p.add_argument("--input_csv", required=True)
+    p.add_argument("--target", required=True)
+    p.add_argument("--output_dir", required=True)
     args = p.parse_args()
 
-    rare_train_only = str(args.rare_train_only).lower() in ("1","true","yes","y","t")
+    df = pd.read_csv(args.input_csv)
 
-    local_in = find_input_csv(args.mounted_input_dir)
-    df = pd.read_csv(local_in, low_memory=False)
+    # Drop missing target rows
+    df = df.dropna(subset=[args.target])
 
-    targets = [c.strip() for c in args.targets_csv.split(",") if c.strip()]
-    input_feats = [c.strip() for c in args.input_features_csv.split(",") if c.strip()]
+    # Split train/val
+    df = df.sample(frac=1, random_state=42)
+    n_val = int(len(df) * 0.2)
+    df_train = df.iloc[:-n_val]
+    df_val   = df.iloc[-n_val:]
 
-    for c in input_feats + targets:
-        if c not in df.columns:
-            raise ValueError(f"Column '{c}' not found in CSV header")
+    df_train["ClubNumber"] = pd.to_numeric(df_train["ClubNumber"], errors="coerce").fillna(0)
+    df_val["ClubNumber"]   = pd.to_numeric(df_val["ClubNumber"], errors="coerce").fillna(0)                                      
 
-    for tgt in targets:
-        train, val = per_target_split(
-            df=df,
-            target_col=tgt,
-            input_feats=input_feats,
-            val_frac=args.val_frac,
-            seed=args.random_seed,
-            min_support=args.min_support,
-            rare_train_only=rare_train_only
-        )
+    # Build FE pipeline
+    fe = build_fe_pipeline(
+        cat_cols=["VendorName"],
+        text_cols=["LineDescription"],
+        num_cols=["ClubNumber"]
+    )
 
-        out_dir_tr = os.path.join(args.output_dir, tgt, "train")
-        out_dir_va = os.path.join(args.output_dir, tgt, "validation")
-        os.makedirs(out_dir_tr, exist_ok=True)
-        os.makedirs(out_dir_va, exist_ok=True)
+    # Fit FE
+    X_train = fe.fit_transform(df_train)
+    X_val   = fe.transform(df_val)
 
-        train.to_csv(os.path.join(out_dir_tr, "train.csv"), index=False)
-        val.to_csv(os.path.join(out_dir_va, "validation.csv"), index=False)
+    # Save FE pipeline
+    joblib.dump(fe, os.path.join(args.output_dir, "fe.pkl"))
+
+    # Save transformed datasets
+    train_out = pd.DataFrame(X_train)
+    train_out["target"] = df_train[args.target].values
+
+    val_out = pd.DataFrame(X_val)
+    val_out["target"] = df_val[args.target].values
+
+    train_out.to_csv(os.path.join(args.output_dir, "train.csv"), index=False)
+    val_out.to_csv(os.path.join(args.output_dir, "val.csv"), index=False)
 
 if __name__ == "__main__":
     main()
-""").strip()
+""")
 
-with open("prepare_per_target_splits.py", "w") as f:
-    f.write(split_script)
+with open("preprocess_fe.py", "w") as f:
+    f.write(preprocess_code)
 
-print("Wrote prepare_per_target_splits.py")
+print("Wrote preprocess_fe.py")

@@ -1,0 +1,214 @@
+# =========================
+# Cell 5: SageMaker Pipeline (Notebook-Safe)
+# =========================
+
+import boto3
+import sagemaker
+from sagemaker.workflow.pipeline import Pipeline
+from sagemaker.workflow.parameters import ParameterString
+from sagemaker.workflow.pipeline_context import PipelineSession
+from sagemaker.processing import ScriptProcessor, ProcessingInput, ProcessingOutput
+from sagemaker.inputs import TrainingInput
+from sagemaker.workflow.steps import ProcessingStep, TrainingStep
+from sagemaker.xgboost.estimator import XGBoost
+from sagemaker.model import Model
+from sagemaker.workflow.model_step import ModelStep
+
+role = sagemaker.get_execution_role()
+pipeline_session = PipelineSession()
+
+# ---- Pipeline Parameters ----
+param_input_csv = ParameterString(
+    name="InputCSV",
+    default_value=INPUT_S3
+)
+
+# ---- Prefixes ----
+SPLIT_PREFIX = f"{DATA_PREFIX}/splits"
+TRAIN_PREFIX = f"{DATA_PREFIX}/train"
+MODEL_PREFIX = f"{DATA_PREFIX}/models"
+
+# ----------------------------------
+# STEP 1 — PREPROCESS + FE (per target)
+# ----------------------------------
+
+preprocess_steps = {}
+
+for tgt in TARGET_COLS:
+
+    proc = ScriptProcessor(
+        image_uri=sagemaker.image_uris.retrieve("sklearn", region, version="1.2-1"),
+        command=["python3"],
+        instance_type="ml.m5.xlarge",
+        instance_count=1,
+        role=role,
+        base_job_name=f"{PROJECT_NAME}-prep-{tgt}"
+    )
+
+    out_prefix = f"{SPLIT_PREFIX}/{tgt}"
+
+    step = ProcessingStep(
+        name=f"Preprocess_{tgt}",
+        processor=proc,
+        code="preprocess_fe.py",
+        inputs=[
+            ProcessingInput(
+                source=param_input_csv,
+                destination="/opt/ml/processing/input"
+            )
+        ],
+        outputs=[
+            ProcessingOutput(
+                output_name="processed",
+                source="/opt/ml/processing/output",
+                destination=out_prefix
+            )
+        ],
+        job_arguments=[
+            "--input_csv", "/opt/ml/processing/input/data.csv",
+            "--target", tgt,
+            "--output_dir", "/opt/ml/processing/output"
+        ]
+    )
+
+    preprocess_steps[tgt] = step
+
+
+# ----------------------------------
+# STEP 2 — TRAIN XGBOOST (per target)
+# ----------------------------------
+
+train_steps = {}
+
+for tgt in TARGET_COLS:
+
+    train_input_prefix = f"{SPLIT_PREFIX}/{tgt}"
+
+    estimator = XGBoost(
+        entry_point="train_xgb.py",
+        source_dir=".",   # CRITICAL FOR NOTEBOOK
+        framework_version="1.3-1",
+        py_version="py3",
+        role=role,
+        instance_type="ml.m5.xlarge",
+        instance_count=1,
+        output_path=f"{TRAIN_PREFIX}/{tgt}",
+        sagemaker_session=pipeline_session
+    )
+
+    step = TrainingStep(
+        name=f"Train_{tgt}",
+        estimator=estimator,
+        inputs={
+            "train_csv": TrainingInput(
+                s3_data=f"{train_input_prefix}/train.csv",
+                content_type="text/csv"
+            ),
+            "val_csv": TrainingInput(
+                s3_data=f"{train_input_prefix}/val.csv",
+                content_type="text/csv"
+            ),
+            "fe_model": TrainingInput(
+                s3_data=f"{train_input_prefix}/fe.pkl",
+                content_type="application/octet-stream"
+            )
+        }
+    )
+
+    train_steps[tgt] = step
+
+
+# ----------------------------------
+# STEP 3 — REPACK MODEL (MME-ready)
+# ----------------------------------
+
+repack_steps = {}
+
+for tgt in TARGET_COLS:
+
+    repack_proc = ScriptProcessor(
+        image_uri=sagemaker.image_uris.retrieve("sklearn", region, version="1.2-1"),
+        command=["python3"],
+        instance_type="ml.m5.large",
+        instance_count=1,
+        role=role,
+        base_job_name=f"{PROJECT_NAME}-repack-{tgt}"
+    )
+
+    model_output_prefix = f"{TRAIN_PREFIX}/{tgt}"
+    mme_dest_prefix     = f"{MODEL_PREFIX}/{tgt}"
+
+    step = ProcessingStep(
+        name=f"Repack_{tgt}",
+        processor=repack_proc,
+        code="repack_for_mme.py",
+        inputs=[
+            ProcessingInput(
+                source=f"{model_output_prefix}/model.tar.gz",
+                destination="/opt/ml/processing/input/model"
+            ),
+        ],
+        outputs=[
+            ProcessingOutput(
+                output_name="mme_tar",
+                source="/opt/ml/processing/output",
+                destination=mme_dest_prefix
+            )
+        ],
+        job_arguments=[
+            "--model_dir", "/opt/ml/processing/input/model",
+            "--output_tar", "/opt/ml/processing/output/model_mme.tar.gz"
+        ]
+    )
+
+    repack_steps[tgt] = step
+
+
+# ----------------------------------
+# STEP 4 — REGISTER MODEL
+# ----------------------------------
+
+register_steps = {}
+
+for tgt in TARGET_COLS:
+
+    model_data_uri = f"{MODEL_PREFIX}/{tgt}/model_mme.tar.gz"
+
+    model = Model(
+        image_uri=sagemaker.image_uris.retrieve("xgboost", region, version="1.3-1"),
+        model_data=model_data_uri,
+        entry_point="inference.py",
+        source_dir=".",  # CRITICAL FOR NOTEBOOK
+        role=role,
+        sagemaker_session=pipeline_session
+    )
+
+    step = ModelStep(
+        name=f"Register_{tgt}",
+        model=model,
+        model_package_group_name=f"{PROJECT_NAME}-{tgt}",
+    )
+
+    register_steps[tgt] = step
+
+
+# ----------------------------------
+# FINAL PIPELINE ASSEMBLY
+# ----------------------------------
+
+all_steps = []
+
+for tgt in TARGET_COLS:
+    all_steps.append(preprocess_steps[tgt])
+    all_steps.append(train_steps[tgt])
+    all_steps.append(repack_steps[tgt])
+    all_steps.append(register_steps[tgt])
+
+pipeline = Pipeline(
+    name=f"{PROJECT_NAME}-pipeline",
+    parameters=[param_input_csv],
+    steps=all_steps,
+    sagemaker_session=pipeline_session
+)
+
+print(pipeline.definition())
