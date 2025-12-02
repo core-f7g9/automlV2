@@ -1,0 +1,18 @@
+import json
+import boto3
+client = boto3.client("sagemaker-runtime")
+
+payload = {
+    "VendorName": ["Walmart"],
+    "LineDescription": ["Office chair assembly"],
+    "ClubNumber": [123]
+}
+
+response = client.invoke_endpoint(
+    EndpointName=endpoint_name,
+    TargetModel="DepartmentCode/model_mme.tar.gz",
+    Body=json.dumps(payload),
+    ContentType="application/json"
+)
+
+print(json.loads(response["Body"].read()))

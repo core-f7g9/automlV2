@@ -1,0 +1,3 @@
+pipeline.upsert(role_arn=role)
+execution = pipeline.start()
+execution.describe()

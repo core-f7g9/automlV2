@@ -1,0 +1,131 @@
+import textwrap
+
+preprocess_code = textwrap.dedent("""
+import argparse
+import os
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import LabelEncoder
+from sklearn.feature_extraction.text import HashingVectorizer
+from sklearn.model_selection import train_test_split
+import joblib
+
+# ---------- VendorName LabelEncoder with UNSEEN support ----------
+
+class SafeLabelEncoder:
+    def __init__(self, unknown_token="Unknown"):
+        self.unknown_token = unknown_token
+        self.classes_ = None
+        self.class_to_idx = None
+
+    def fit(self, values):
+        values = values.astype(str).fillna(self.unknown_token)
+        le = LabelEncoder()
+        le.fit(values)
+
+        classes = list(le.classes_)
+        if self.unknown_token not in classes:
+            classes.append(self.unknown_token)
+
+        self.classes_ = np.array(classes)
+        self.class_to_idx = {cls: idx for idx, cls in enumerate(self.classes_)}
+        return self
+
+    def transform(self, values):
+        values = values.astype(str).fillna(self.unknown_token)
+        unknown_idx = self.class_to_idx[self.unknown_token]
+        encoded = [self.class_to_idx.get(v, unknown_idx) for v in values]
+        return np.array(encoded, dtype=np.int64).reshape(-1, 1)
+
+
+# ---------- HashingVectorizer ----------
+
+def build_text_hasher():
+    return HashingVectorizer(
+        n_features=1024,
+        alternate_sign=False,
+        norm=None
+    )
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--input_csv", required=True)
+    p.add_argument("--target", required=True)
+    p.add_argument("--output_dir", required=True)
+    args = p.parse_args()
+
+    df = pd.read_csv(args.input_csv)
+
+    df = df.dropna(subset=[args.target])
+
+    # Ensure ClubNumber numeric
+    df["ClubNumber"] = pd.to_numeric(df["ClubNumber"], errors="coerce").fillna(0).astype(np.float32)
+
+    # Stratified split; fallback to simple split if stratify is not possible
+    try:
+        df_train, df_val = train_test_split(
+            df,
+            test_size=0.2,
+            random_state=42,
+            stratify=df[args.target]
+        )
+    except ValueError:
+        df_train, df_val = train_test_split(
+            df,
+            test_size=0.2,
+            random_state=42,
+            shuffle=True
+        )
+
+    # Label encode target
+    target_le = LabelEncoder()
+    y_train = target_le.fit_transform(df_train[args.target])
+    y_val   = target_le.transform(df_val[args.target])
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    joblib.dump(target_le, os.path.join(args.output_dir, "label_encoder.pkl"))
+
+    # Vendor encoder
+    vendor_enc = SafeLabelEncoder().fit(df_train["VendorName"])
+    vendor_train = vendor_enc.transform(df_train["VendorName"])
+    vendor_val   = vendor_enc.transform(df_val["VendorName"])
+
+    # Text hashing
+    text_vec = build_text_hasher()
+    text_train = text_vec.transform(df_train["LineDescription"].astype(str).fillna("")).toarray()
+    text_val   = text_vec.transform(df_val["LineDescription"].astype(str).fillna("")).toarray()
+
+    # Numeric
+    num_train = df_train[["ClubNumber"]].astype(np.float32).values
+    num_val   = df_val[["ClubNumber"]].astype(np.float32).values
+
+    # Full feature matrix
+    X_train = np.hstack([vendor_train, text_train, num_train])
+    X_val   = np.hstack([vendor_val,   text_val,   num_val])
+
+    # Save FE pipeline
+    fe = {
+        "vendor_encoder": vendor_enc,
+        "text_hasher": text_vec
+    }
+    joblib.dump(fe, os.path.join(args.output_dir, "fe.pkl"))
+
+    # Export CSV
+    train_df = pd.DataFrame(X_train)
+    train_df["target"] = y_train
+
+    val_df = pd.DataFrame(X_val)
+    val_df["target"] = y_val
+
+    train_df.to_csv(os.path.join(args.output_dir, "train.csv"), index=False)
+    val_df.to_csv(os.path.join(args.output_dir, "val.csv"), index=False)
+
+
+if __name__ == "__main__":
+    main()
+""")
+
+with open("preprocess_fe.py", "w") as f:
+    f.write(preprocess_code)
+
+print("Wrote preprocess_fe.py")

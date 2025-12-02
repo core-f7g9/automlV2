@@ -1,0 +1,73 @@
+import textwrap
+
+train_code = textwrap.dedent("""
+import argparse
+import os
+import pandas as pd
+import xgboost as xgb
+import joblib
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--train_csv", default=os.environ.get("SM_CHANNEL_TRAIN_CSV"))
+    p.add_argument("--val_csv", default=os.environ.get("SM_CHANNEL_VAL_CSV"))
+    p.add_argument("--fe_model", default=os.environ.get("SM_CHANNEL_FE_MODEL"))
+    p.add_argument("--label_model", default=os.environ.get("SM_CHANNEL_LABEL_MODEL"))
+    p.add_argument("--output_dir", default=os.environ.get("SM_MODEL_DIR", "./"))
+    args = p.parse_args()
+
+    for name, path in {
+        "train_csv": args.train_csv,
+        "val_csv": args.val_csv,
+        "fe_model": args.fe_model,
+        "label_model": args.label_model,
+    }.items():
+        if not path:
+            raise ValueError(f"Missing required input for {name}")
+
+    df_train = pd.read_csv(args.train_csv)
+    df_val = pd.read_csv(args.val_csv)
+
+    y_train = df_train["target"]
+    y_val   = df_val["target"]
+
+    X_train = df_train.drop(columns=["target"])
+    X_val   = df_val.drop(columns=["target"])
+
+    dtrain = xgb.DMatrix(X_train, label=y_train)
+    dval   = xgb.DMatrix(X_val, label=y_val)
+
+    label_enc = joblib.load(args.label_model)
+
+    params = {
+        "objective": "multi:softprob",
+        "num_class": len(label_enc.classes_),
+        "max_depth": 6,
+        "eta": 0.2,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "eval_metric": "mlogloss"
+    }
+
+    bst = xgb.train(
+        params,
+        dtrain,
+        evals=[(dval, "val")],
+        num_boost_round=300,
+        early_stopping_rounds=20
+    )
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    bst.save_model(os.path.join(args.output_dir, "model.xgb"))
+    joblib.dump(joblib.load(args.fe_model), os.path.join(args.output_dir, "fe.pkl"))
+    joblib.dump(label_enc, os.path.join(args.output_dir, "label_encoder.pkl"))
+
+if __name__ == "__main__":
+    main()
+""")
+
+with open("train_xgb.py", "w") as f:
+    f.write(train_code)
+
+print("Wrote train_xgb.py")

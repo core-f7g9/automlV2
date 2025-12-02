@@ -1,0 +1,79 @@
+import textwrap
+
+infer_code = textwrap.dedent("""
+import json
+import os
+import joblib
+import xgboost as xgb
+import numpy as np
+import pandas as pd
+
+def model_fn(model_dir):
+    fe = joblib.load(os.path.join(model_dir, "fe.pkl"))
+    lbl = joblib.load(os.path.join(model_dir, "label_encoder.pkl"))
+    bst = xgb.Booster()
+    bst.load_model(os.path.join(model_dir, "model.xgb"))
+    return {"fe": fe, "lbl": lbl, "bst": bst}
+
+def input_fn(request_body, content_type):
+    data = json.loads(request_body)
+    return pd.DataFrame(data)
+
+def predict_fn(input_data, model):
+    fe = model["fe"]
+    lbl = model["lbl"]
+    bst = model["bst"]
+
+    vendor = fe["vendor_encoder"].transform(input_data["VendorName"])
+    text   = fe["text_hasher"].transform(input_data["LineDescription"].astype(str).fillna("")).toarray()
+    num    = input_data["ClubNumber"].astype(np.float32).values.reshape(-1, 1)
+
+    X = np.hstack([vendor, text, num])
+    preds = bst.predict(xgb.DMatrix(X))
+    cls = np.argmax(preds, axis=1)
+    labels = lbl.inverse_transform(cls)
+    return labels.tolist()
+
+def output_fn(prediction, accept):
+    return json.dumps(prediction)
+""")
+
+with open("inference.py", "w") as f:
+    f.write(infer_code)
+
+print("Wrote inference.py")
+
+repack_code = textwrap.dedent("""
+import argparse
+import tarfile
+import os
+import tempfile
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--model_tar", required=True)
+    p.add_argument("--inference_script", default="inference.py")
+    p.add_argument("--output_tar", required=True)
+    args = p.parse_args()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with tarfile.open(args.model_tar, "r:gz") as src:
+            src.extractall(tmpdir)
+
+        inference_path = args.inference_script
+        if not os.path.isabs(inference_path):
+            inference_path = os.path.join(os.getcwd(), inference_path)
+
+        with tarfile.open(args.output_tar, "w:gz") as dst:
+            for fname in ("model.xgb", "fe.pkl", "label_encoder.pkl"):
+                dst.add(os.path.join(tmpdir, fname), arcname=fname)
+            dst.add(inference_path, arcname="code/inference.py")
+
+if __name__ == "__main__":
+    main()
+""")
+
+with open("repack_for_mme.py", "w") as f:
+    f.write(repack_code)
+
+print("Wrote repack_for_mme.py")
