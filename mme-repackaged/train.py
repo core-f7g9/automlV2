@@ -1,52 +1,38 @@
-# === Cleaned SageMaker Pipeline: Autopilot (XGBoost-only) with MME Deployment ===
-
-import os
-import time
 import boto3
 import sagemaker
+
+from sagemaker.processing import ScriptProcessor, ProcessingInput, ProcessingOutput
+from sagemaker.workflow.steps import ProcessingStep
 from sagemaker.workflow.pipeline import Pipeline
+from sagemaker.workflow.pipeline_context import PipelineSession
 from sagemaker.workflow.parameters import (
     ParameterString, ParameterFloat, ParameterInteger, ParameterBoolean
 )
-from sagemaker.processing import ScriptProcessor, ProcessingInput, ProcessingOutput
-from sagemaker.workflow.steps import ProcessingStep, CacheConfig
-from sagemaker.workflow.pipeline_context import PipelineSession
+from sagemaker.workflow.functions import Join
+
 from sagemaker.automl.automl import AutoML, AutoMLInput
 from sagemaker.workflow.automl_step import AutoMLStep
-from sagemaker.workflow.functions import Join
-from sagemaker.workflow.lambda_step import LambdaStep, LambdaOutput, LambdaOutputTypeEnum
-from sagemaker.lambda_helper import Lambda
+from sagemaker.model_metrics import ModelMetrics, MetricsSource
+from sagemaker.workflow.step_collections import RegisterModel
 from sagemaker.workflow.conditions import ConditionEquals
 from sagemaker.workflow.condition_step import ConditionStep
+from sagemaker.workflow.steps import CacheConfig
 
-region = boto3.Session().region_name
-p_sess = PipelineSession()
-role_arn = sagemaker.get_execution_role()
-sm_sess = sagemaker.Session()
+# Reuse setup variables
 
-CLIENT_NAME = "client1"
-PROJECT_NAME = f"{CLIENT_NAME}-autopilot-v1"
-OUTPUT_PREFIX = "mlops"
-BUCKET = sm_sess.default_bucket()
-INPUT_S3CSV = f"s3://{BUCKET}/input/data.csv"
-
-TARGET_COLS = ["DepartmentCode", "AccountCode", "SubAccountCode", "LocationCode"]
-INPUT_FEATURES = ["VendorName", "LineDescription", "ClubNumber"]
-
+# Pipeline parameters
 bucket_param = ParameterString("Bucket", default_value=BUCKET)
 input_s3_csv_param = ParameterString("InputS3CSV", default_value=INPUT_S3CSV)
 val_frac_param = ParameterFloat("ValFrac", default_value=0.20)
 seed_param = ParameterInteger("RandomSeed", default_value=42)
 min_support_param = ParameterInteger("MinSupport", default_value=5)
 rare_train_only_param = ParameterBoolean("RareTrainOnly", default_value=True)
-DeployAfterRegister = ParameterBoolean("DeployAfterRegister", default_value=True)
-EndpointNameParam = ParameterString("EndpointName", default_value=f"{PROJECT_NAME}-codes-mme")
-InstanceTypeParam = ParameterString("InstanceType", default_value="ml.m5.large")
-InitialInstanceCount = ParameterInteger("InitialInstanceCount", default_value=1)
 
-img = sagemaker.image_uris.retrieve("sklearn", region, version="1.2-1")
+# Step 1: Per-target splits
+sk_img = sagemaker.image_uris.retrieve("sklearn", region, "1.2-1")
+
 split_processor = ScriptProcessor(
-    image_uri=img,
+    image_uri=sk_img,
     role=role_arn,
     instance_type="ml.m5.large",
     instance_count=1,
@@ -58,7 +44,7 @@ processing_outputs = []
 for tgt in TARGET_COLS:
     processing_outputs += [
         ProcessingOutput(output_name=f"train_{tgt}", source=f"/opt/ml/processing/output/{tgt}/train"),
-        ProcessingOutput(output_name=f"validation_{tgt}", source=f"/opt/ml/processing/output/{tgt}/validation")
+        ProcessingOutput(output_name=f"validation_{tgt}", source=f"/opt/ml/processing/output/{tgt}/validation"),
     ]
 
 split_step = ProcessingStep(
@@ -77,92 +63,90 @@ split_step = ProcessingStep(
         "--mounted_input_dir", "/opt/ml/processing/input",
         "--output_dir", "/opt/ml/processing/output",
     ],
-    cache_config=CacheConfig(enable_caching=True, expire_after="7d")
 )
 
-branches = []
-best_images = {}
-best_datas = {}
+automl_steps = {}
+best_model_data = {}
+best_model_image = {}
 
 for tgt in TARGET_COLS:
     train_s3 = split_step.properties.ProcessingOutputConfig.Outputs[f"train_{tgt}"].S3Output.S3Uri
-    val_s3 = split_step.properties.ProcessingOutputConfig.Outputs[f"validation_{tgt}"].S3Output.S3Uri
+    val_s3   = split_step.properties.ProcessingOutputConfig.Outputs[f"validation_{tgt}"].S3Output.S3Uri
 
-    auto_inputs = [
-        AutoMLInput(inputs=train_s3, channel_type="training", content_type="text/csv;header=present", target_attribute_name=tgt),
-        AutoMLInput(inputs=val_s3, channel_type="validation", content_type="text/csv;header=present", target_attribute_name=tgt)
+    inputs = [
+        AutoMLInput(
+            inputs=train_s3,
+            channel_type="training",
+            target_attribute_name=tgt,
+            content_type="text/csv;header=present",
+        ),
+        AutoMLInput(
+            inputs=val_s3,
+            channel_type="validation",
+            target_attribute_name=tgt,
+            content_type="text/csv;header=present",
+        ),
     ]
 
     automl = AutoML(
         role=role_arn,
         sagemaker_session=p_sess,
         target_attribute_name=tgt,
-        output_path=f"s3://{BUCKET}/{OUTPUT_PREFIX}/autopilot-output/{tgt}/",
         problem_type="MulticlassClassification",
+        output_path=f"s3://{BUCKET}/{OUTPUT_PREFIX}/automl-xgb/{tgt}/",
         job_objective={"MetricName": "Accuracy"},
         mode="ENSEMBLING",
         max_candidates=5,
-        max_runtime_per_training_job_in_seconds=1800,
-        total_job_runtime_in_seconds=6 * 3600,
-        include_algorithms=["xgboost"]
+        include_algorithms=["xgboost"],
     )
 
-    step = AutoMLStep(name=f"RunAutopilotV1_{tgt}", step_args=automl.fit(inputs=auto_inputs))
-    branches.append(step)
+    step = AutoMLStep(
+        name=f"AutoML_XGB_{tgt}",
+        step_args=automl.fit(inputs)
+    )
+    automl_steps[tgt] = step
 
-    best_images[tgt] = step.properties.BestCandidate.InferenceContainers[0].Image
-    best_datas[tgt] = step.properties.BestCandidate.InferenceContainers[0].ModelDataUrl
+    best_model_data[tgt]  = step.properties.BestCandidate.InferenceContainers[0].ModelDataUrl
+    best_model_image[tgt] = step.properties.BestCandidate.InferenceContainers[0].Image
 
-deploy_lambda_name = f"{PROJECT_NAME}-deploy-mme"
-MME_MODELS_PREFIX = f"s3://{BUCKET}/{OUTPUT_PREFIX}/mme/{CLIENT_NAME}/models/"
+register_steps = []
 
-deploy_lam = Lambda(
-    function_name=deploy_lambda_name,
-    execution_role_arn=role_arn,
-    script="deploy_mme_from_autopilot.py",
-    handler="deploy_mme_from_autopilot.handler",
-    timeout=600,
-    memory_size=512,
-    environment={"Variables": {"EXEC_ROLE_ARN": role_arn}},
-)
+for tgt in TARGET_COLS:
+    model_metrics = ModelMetrics(
+        model_statistics=MetricsSource(
+            s3_uri=automl_steps[tgt].properties.BestCandidate.Metrics[0].Value,
+            content_type="application/json"
+        )
+    )
 
-target_names_csv = ",".join(TARGET_COLS)
-target_images_csv = Join(on=",", values=[best_images[t].to_string() for t in TARGET_COLS])
-target_datas_csv = Join(on=",", values=[best_datas[t] for t in TARGET_COLS])
+    register_step = RegisterModel(
+        name=f"RegisterModel_{tgt}",
+        estimator=None,  # not needed for AutoML
+        model_data=best_model_data[tgt],
+        content_types=["text/csv"],
+        response_types=["text/csv"],
+        model_package_group_name=f"{CLIENT_NAME}-{tgt}-models",
+        image_uri=best_model_image[tgt],
+        approval_status="Approved",
+        model_metrics=model_metrics
+    )
 
-deploy_step = LambdaStep(
-    name="DeployAllOnOneInstance_MME",
-    lambda_func=deploy_lam,
-    inputs={
-        "EndpointName": EndpointNameParam.to_string(),
-        "InstanceType": InstanceTypeParam.to_string(),
-        "InitialInstanceCount": InitialInstanceCount.to_string(),
-        "ModelsPrefix": MME_MODELS_PREFIX,
-        "TargetNamesCSV": target_names_csv,
-        "TargetImagesCSV": target_images_csv,
-        "TargetModelDatasCSV": target_datas_csv,
-    },
-    outputs=[LambdaOutput(output_name="status", output_type=LambdaOutputTypeEnum.String)]
-)
+    register_steps.append(register_step)
 
-deploy_condition_step = ConditionStep(
-    name="MaybeDeployAllOnOneInstance_MME",
-    conditions=[ConditionEquals(left=DeployAfterRegister, right=True)],
-    if_steps=[deploy_step],
-    else_steps=[]
-)
-
-pipeline = Pipeline(
-    name=f"{PROJECT_NAME}-pipeline-4targets-mme",
+pipeline_a = Pipeline(
+    name=f"{PROJECT_NAME}-pipeline-xgb",
     parameters=[
-        bucket_param, input_s3_csv_param, val_frac_param, seed_param,
-        min_support_param, rare_train_only_param,
-        DeployAfterRegister, EndpointNameParam, InstanceTypeParam, InitialInstanceCount
+        bucket_param,
+        input_s3_csv_param,
+        val_frac_param,
+        seed_param,
+        min_support_param,
+        rare_train_only_param,
     ],
-    steps=[split_step] + branches + [deploy_condition_step],
+    steps=[split_step] + list(automl_steps.values()) + register_steps,
     sagemaker_session=p_sess,
 )
 
-pipeline.upsert(role_arn=role_arn)
-execution = pipeline.start()
-print("Pipeline execution started:", execution.arn)
+pipeline_a.upsert(role_arn=role_arn)
+execution = pipeline_a.start()
+print("Started Pipeline A:", execution.arn)
