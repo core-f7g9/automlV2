@@ -1,120 +1,172 @@
-# ============================
-# Cell 4 — Pipeline A (Corrected)
-# ============================
+# ============================================================
+# Cell 4 — Pipeline: Preprocess → Train (AutoML V1) → Repack → Register
+# ============================================================
 
-from sagemaker.processing import ScriptProcessor, ProcessingInput, ProcessingOutput
-from sagemaker.workflow.steps import ProcessingStep
-from sagemaker.workflow.pipeline import Pipeline
-from sagemaker.workflow.parameters import (
-    ParameterString, ParameterFloat, ParameterInteger, ParameterBoolean
-)
-from sagemaker.workflow.steps import TrainingStep
-from sagemaker.workflow.step_collections import RegisterModel
+import boto3
+import sagemaker
+from sagemaker.workflow.parameters import ParameterString, ParameterInteger, ParameterFloat
 from sagemaker.workflow.pipeline_context import PipelineSession
-from sagemaker.xgboost.estimator import XGBoost
-from sagemaker.workflow.steps import CacheConfig
+from sagemaker.workflow.steps import ProcessingStep, CacheConfig
+from sagemaker.processing import ScriptProcessor, ProcessingInput, ProcessingOutput
+from sagemaker.lambda_helper import Lambda
+from sagemaker.workflow.lambda_step import LambdaStep, LambdaOutput, LambdaOutputTypeEnum
+from sagemaker.workflow.model_step import ModelStep
+from sagemaker.model import Model
 
-# -------------------------------
-# Parameters
-# -------------------------------
-val_frac_param        = ParameterFloat("ValFrac", default_value=0.20)
-seed_param            = ParameterInteger("Seed", default_value=42)
-min_support_param     = ParameterInteger("MinSupport", default_value=5)
-rare_train_only_param = ParameterBoolean("RareTrainOnly", default_value=True)
+cache_config = CacheConfig(enable_caching=False)
 
-# -------------------------------
-# Preprocessing (Hybrid TF-IDF)
-# -------------------------------
-sk_img = sagemaker.image_uris.retrieve("sklearn", region, "1.2-1")
+# ============================================================
+# PREPROCESSING STEP
+# ============================================================
 
-split_proc = ScriptProcessor(
-    image_uri=sk_img,
-    role=role_arn,
-    instance_type="ml.m5.large",
+processor = ScriptProcessor(
+    image_uri=sagemaker.image_uris.retrieve("sklearn", region="us-east-1"),
     command=["python3"],
-    sagemaker_session=p_sess
+    role=role_arn,
+    instance_type="ml.m5.xlarge",
+    instance_count=1
 )
 
-processing_outputs = []
-for tgt in TARGET_COLS:
-    processing_outputs.append(
-        ProcessingOutput(
-            output_name=f"{tgt}_out",
-            source=f"/opt/ml/processing/output/{tgt}"
-        )
-    )
-
-split_step = ProcessingStep(
-    name="HybridTFIDF_Preprocess",
-    processor=split_proc,
-    code="preprocess_hybrid.py",
+step_preprocess = ProcessingStep(
+    name="PerTargetPreprocess",
+    processor=processor,
     inputs=[
         ProcessingInput(
             source=INPUT_S3CSV,
-            destination="/opt/ml/processing/input"
+            destination="/opt/ml/processing/input",
+        ),
+    ],
+    outputs=[
+        ProcessingOutput(
+            source="/opt/ml/processing/output",
+            destination=f"s3://{BUCKET}/{OUTPUT_PREFIX}/preprocess/"
         )
     ],
-    outputs=processing_outputs,
+    code="prepare_per_target_splits.py",
     job_arguments=[
         "--targets_csv", ",".join(TARGET_COLS),
-        "--inputs_csv", ",".join(INPUT_FEATURES),
-        "--val_frac", val_frac_param.to_string(),
-        "--seed", seed_param.to_string(),
-        "--min_support", min_support_param.to_string(),
-        "--rare_train_only", rare_train_only_param.to_string(),
-        "--input_dir", "/opt/ml/processing/input",
-        "--output_dir", "/opt/ml/processing/output"
-    ]
+        "--input_features_csv", ",".join(INPUT_FEATURES),
+        "--val_frac", "0.2",
+        "--random_seed", "42",
+        "--min_support", "5",
+        "--rare_train_only", "true",
+    ],
+    cache_config=cache_config,
 )
 
-# -------------------------------
-# Training steps per target
-# -------------------------------
-train_steps = []
-register_steps = []
+# ============================================================
+# CREATE LAMBDA FUNCTIONS
+# ============================================================
+
+lambda_automl = Lambda(
+    function_name=f"{CLIENT_NAME}-lambda-automl",
+    execution_role=role_arn,
+    script="lambda_launch_automl.py",
+    handler="handler",
+    timeout=900,
+)
+
+lambda_repack = Lambda(
+    function_name=f"{CLIENT_NAME}-lambda-repack",
+    execution_role=role_arn,
+    script="lambda_repack_mme.py",
+    handler="handler",
+    timeout=900,
+)
+
+# ============================================================
+# AUTOML + REPACK + REGISTER (loop per target)
+# ============================================================
+
+all_steps = [step_preprocess]
+repacked_artifacts = {}
 
 for tgt in TARGET_COLS:
 
-    data_channel = split_step.properties.ProcessingOutputConfig.Outputs[f"{tgt}_out"].S3Output.S3Uri
+    # -----------------------
+    # AutoML step
+    # -----------------------
+    automl_config = {
+        "AutoMLJobName": f"{CLIENT_NAME}-{tgt}-automl",
+        "InputDataConfig": [{
+            "ChannelName": "training",
+            "DataSource": {
+                "S3DataSource": {
+                    "S3DataType": "S3Prefix",
+                    "S3Uri": f"s3://{BUCKET}/{OUTPUT_PREFIX}/preprocess/{tgt}/train/"
+                }
+            },
+            "TargetAttributeName": tgt,
+            "ContentType": "text/csv",
+            "CompressionType": "None"
+        }],
+        "OutputDataConfig": {
+            "S3OutputPath": f"s3://{BUCKET}/{OUTPUT_PREFIX}/automl/{tgt}/"
+        },
+        "RoleArn": role_arn,
+        "AutoMLJobConfig": {
+            "CompletionCriteria": {"MaxRuntimePerTrainingJobInSeconds": 1200},
+            "Mode": "ENSEMBLING",
+            "AlgorithmConfig": {"AutoMLAlgorithms": ["XGBoost"]},
+        },
+        "ProblemType": "MulticlassClassification"
+    }
 
-    xgb_estimator = XGBoost(
-        entry_point="train_xgb.py",
-        source_dir="xgb_src",
+    step_automl = LambdaStep(
+        name=f"AutoML_{tgt}",
+        lambda_func=lambda_automl,
+        inputs={"automl_config": automl_config},
+        outputs=[
+            LambdaOutput(output_name="best_model_artifact", output_type=LambdaOutputTypeEnum.String),
+        ],
+    )
+
+    # -----------------------
+    # Repack step
+    # -----------------------
+    step_repack = LambdaStep(
+        name=f"Repack_{tgt}",
+        lambda_func=lambda_repack,
+        inputs={
+            "model_artifact": step_automl.outputs["best_model_artifact"],
+            "target": tgt,
+        },
+        outputs=[
+            LambdaOutput(output_name="repacked_artifact", output_type=LambdaOutputTypeEnum.String),
+        ],
+    )
+
+    repacked_artifacts[tgt] = step_repack.outputs["repacked_artifact"]
+
+    # -----------------------
+    # Register Model step
+    # -----------------------
+    model = Model(
+        model_data=step_repack.outputs["repacked_artifact"],
         role=role_arn,
-        instance_type="ml.m5.large",
-        instance_count=1,
-        framework_version="1.7-1",
-        py_version="py3",
-        sagemaker_session=p_sess,
-        hyperparameters={"target": tgt}
+        image_uri=sagemaker.image_uris.retrieve("xgboost", region),
+        entry_point="inference.py",
+        source_dir=".",  # inference.py is local
     )
 
-    train_step = TrainingStep(
-        name=f"Train_{tgt}",
-        estimator=xgb_estimator,
-        inputs={"data": data_channel}
+    register_step = ModelStep(
+        name=f"RegisterModel_{tgt}",
+        model=model,
+        model_data=step_repack.outputs["repacked_artifact"],
+        depends_on=[step_repack.name],
     )
-    train_steps.append(train_step)
 
-    register_step = RegisterModel(
-        name=f"Register_{tgt}",
-        model_data=train_step.properties.ModelArtifacts.S3ModelArtifacts,
-        image_uri=xgb_estimator.image_uri,
-        content_types=["application/json"],      # FIXED
-        response_types=["application/json"],     # FIXED
-        model_package_group_name=f"{CLIENT_NAME}-{tgt}-models",
-        approval_status="Approved"
-    )
-    register_steps.append(register_step)
+    all_steps += [step_automl, step_repack, register_step]
 
-# -------------------------------
-# Build Pipeline A
-# -------------------------------
-pipeline_a = Pipeline(
-    name=f"{PROJECT_NAME}-pipeline-A",
-    steps=[split_step] + train_steps + register_steps,
-    sagemaker_session=p_sess
+# ============================================================
+# PIPELINE
+# ============================================================
+
+pipeline = Pipeline(
+    name=f"{CLIENT_NAME}-xgb-mme",
+    parameters=[],
+    steps=all_steps,
+    sagemaker_session=p_sess,
 )
 
-pipeline_a.upsert(role_arn=role_arn)
-print("PipelineA created.")
+print("Pipeline created — ready for execution.")
