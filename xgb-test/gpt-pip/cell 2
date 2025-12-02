@@ -6,8 +6,9 @@ import pandas as pd
 import numpy as np
 import joblib
 import json
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import HashingVectorizer
 from sklearn.preprocessing import LabelEncoder
+from scipy import sparse
 
 
 # -----------------------------
@@ -24,7 +25,7 @@ args = parser.parse_args()
 targets = json.loads(args.targets)
 input_features = json.loads(args.input_features)
 output_dir = args.output_dir
-tfidf_max = int(args.tfidf_max_features)
+hash_dim = int(args.tfidf_max_features)
 
 os.makedirs(output_dir, exist_ok=True)
 
@@ -33,7 +34,7 @@ os.makedirs(output_dir, exist_ok=True)
 # Auto-detect CSV
 # -----------------------------
 csv_files = glob.glob(os.path.join(args.input_dir, "*.csv"))
-if len(csv_files) == 0:
+if not csv_files:
     raise FileNotFoundError(f"No CSV found in {args.input_dir}")
 
 input_csv = csv_files[0]
@@ -50,50 +51,49 @@ if missing:
     raise ValueError(f"Dataset missing required columns: {missing}")
 
 
-# -------------------------------------------------
-# Build dynamic feature pipeline + metadata
-# -------------------------------------------------
-feature_frames = []
-feature_pipeline = []     # <-- this will be saved as preprocess_meta.json
-artifacts_to_save = {}
+# -----------------------------
+# Build dynamic feature pipeline
+# -----------------------------
+feature_blocks = []
+feature_pipeline = []
 
 
 for feat in input_features:
-
     col = df[feat]
 
-    # 1. TEXT FEATURE: TF-IDF
+    # TEXT FEATURES
     if col.dtype == object and (
         "desc" in feat.lower() or "text" in feat.lower() or "line" in feat.lower()
     ):
-        print(f"🔹 TF-IDF encoding text feature: {feat}")
+        print(f"🔹 HashingVectorizer text feature: {feat}")
 
-        vec = TfidfVectorizer(max_features=tfidf_max)
-        X_text = vec.fit_transform(col.fillna("").astype(str))
+        vec = HashingVectorizer(
+            n_features=hash_dim,
+            alternate_sign=False,
+            norm=None
+        )
 
-        feature_frames.append(X_text.toarray())
-
-        # Save vocab → dynamic filename per feature
-        vocab_file = f"tfidf_{feat}.pkl"
-        joblib.dump(vec.vocabulary_, os.path.join(output_dir, vocab_file))
+        X = vec.transform(col.fillna("").astype(str))
+        feature_blocks.append(X)
 
         feature_pipeline.append({
             "name": feat,
-            "type": "tfidf",
-            "file": vocab_file
+            "type": "hash",
+            "hash_dim": hash_dim
         })
         continue
 
-
-    # 2. CATEGORICAL FEATURE → LabelEncoder
+    # CATEGORICAL FEATURES
     if col.dtype == object:
-        print(f"🔹 Label encoding categorical feature: {feat}")
+        print(f"🔹 Label encoding categorical: {feat}")
 
         enc = LabelEncoder()
         df[feat] = df[feat].fillna("").astype(str)
-        encoded = enc.fit_transform(df[feat]).reshape(-1, 1)
+        y = enc.fit_transform(df[feat])
 
-        feature_frames.append(encoded)
+        # encode as sparse column
+        X = sparse.csr_matrix(y.reshape(-1, 1))
+        feature_blocks.append(X)
 
         enc_file = f"labelenc_{feat}.pkl"
         joblib.dump(enc, os.path.join(output_dir, enc_file))
@@ -105,11 +105,11 @@ for feat in input_features:
         })
         continue
 
-
-    # 3. NUMERIC FEATURE
+    # NUMERIC FEATURES
     print(f"🔹 Numeric feature: {feat}")
-    num = pd.to_numeric(col.fillna(0), errors="coerce").fillna(0).values.reshape(-1, 1)
-    feature_frames.append(num)
+    y = pd.to_numeric(col.fillna(0), errors="coerce").fillna(0).values.reshape(-1, 1)
+    X = sparse.csr_matrix(y)
+    feature_blocks.append(X)
 
     feature_pipeline.append({
         "name": feat,
@@ -117,34 +117,38 @@ for feat in input_features:
     })
 
 
-# -------------------------------------------------
-# Merge feature blocks → final X matrix
-# -------------------------------------------------
-X_full = np.hstack(feature_frames)
+# -----------------------------
+# Merge sparse feature blocks → sparse matrix
+# -----------------------------
+X_full = sparse.hstack(feature_blocks).tocsr()
 
-# Save metadata for inference
+
+# -----------------------------
+# Save metadata
+# -----------------------------
 meta = {
     "feature_pipeline": feature_pipeline,
     "targets": targets
 }
+
 with open(os.path.join(output_dir, "preprocess_meta.json"), "w") as f:
     json.dump(meta, f, indent=2)
 
 
-# -------------------------------------------------
-# Split per target
-# -------------------------------------------------
+# -----------------------------
+# Create per-target splits
+# -----------------------------
+X_full_np = X_full.toarray()   # final materialization only ONCE
+
 for tgt in targets:
     print(f"🔧 Processing target: {tgt}")
 
     df_t = df[df[tgt].notna()].copy()
     y_t = df_t[tgt].astype(str).values
 
-    # Match rows for X_full
     mask = df[tgt].notna().values
-    X_t = X_full[mask]
+    X_t = X_full_np[mask]
 
-    # Split 80/20
     n = len(y_t)
     cut = int(n * 0.8)
 
@@ -165,4 +169,4 @@ for tgt in targets:
     val_df["label"] = y_val
     val_df.to_csv(os.path.join(tgt_dir, "val.csv"), index=False)
 
-print("✅ Preprocess complete. Metadata + dynamic features saved.")
+print("✅ Preprocess complete. HashingVectorizer + metadata saved.")

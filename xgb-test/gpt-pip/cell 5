@@ -4,80 +4,90 @@ import numpy as np
 import xgboost as xgb
 import os
 import pickle
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import HashingVectorizer
+
 
 def model_fn(model_dir):
 
-    # load boosted model
+    # Load trained booster
     booster = xgb.Booster()
     booster.load_model(os.path.join(model_dir, "xgboost-model"))
 
-    # load class map
+    # Load class map
     with open(os.path.join(model_dir, "class_map.json")) as f:
         class_map = json.load(f)
 
-    # load preprocess metadata
+    # Load preprocess metadata
     meta_path = os.path.join(model_dir, "preprocess_meta.json")
     with open(meta_path) as f:
         meta = json.load(f)
 
     feature_pipeline = meta["feature_pipeline"]
 
-    # load artifacts dynamically
-    artifacts = {}
+    # Load label encoders dynamically
+    encoders = {}
     for step in feature_pipeline:
-        if step["type"] == "tfidf":
-            with open(os.path.join(model_dir, step["file"]), "rb") as f:
-                vocab = pickle.load(f)
-            artifacts[step["name"]] = {"type": "tfidf", "vocab": vocab}
-
-        elif step["type"] == "labelenc":
-            with open(os.path.join(model_dir, step["file"]), "rb") as f:
+        if step["type"] == "labelenc":
+            enc_path = os.path.join(model_dir, step["file"])
+            with open(enc_path, "rb") as f:
                 enc = pickle.load(f)
-            artifacts[step["name"]] = {"type": "labelenc", "encoder": enc}
-
-        else:
-            artifacts[step["name"]] = {"type": "numeric"}
+            encoders[step["name"]] = enc
 
     return {
         "model": booster,
         "class_map": class_map,
         "pipeline": feature_pipeline,
-        "artifacts": artifacts
+        "encoders": encoders
     }
+
 
 def input_fn(request_body, request_content_type):
     return json.loads(request_body)
 
+
 def predict_fn(data, model_artifacts):
 
     pipeline = model_artifacts["pipeline"]
-    artifacts = model_artifacts["artifacts"]
+    encoders = model_artifacts["encoders"]
     booster = model_artifacts["model"]
 
     feature_values = []
 
     for step in pipeline:
         name = step["name"]
-        ftype = artifacts[name]["type"]
+        ftype = step["type"]
 
         raw_val = data[name]
 
-        if ftype == "tfidf":
-            vocab = artifacts[name]["vocab"]
-            vec = TfidfVectorizer(vocabulary=vocab)
-            X = vec.fit_transform([str(raw_val)]).toarray()[0]
+        # ---------------------------------------------------------
+        # TEXT FEATURE → HashingVectorizer
+        # ---------------------------------------------------------
+        if ftype == "hash":
+            vec = HashingVectorizer(
+                n_features=step["hash_dim"],
+                alternate_sign=False,
+                norm=None
+            )
+            X = vec.transform([str(raw_val)]).toarray()[0]
             feature_values.append(X)
+            continue
 
-        elif ftype == "labelenc":
-            enc = artifacts[name]["encoder"]
+        # ---------------------------------------------------------
+        # CATEGORICAL FEATURE → LabelEncoder
+        # ---------------------------------------------------------
+        if ftype == "labelenc":
+            enc = encoders[name]
             val = enc.transform([str(raw_val)])[0]
             feature_values.append(np.array([val]))
+            continue
 
-        else:  # numeric
-            val = float(raw_val)
-            feature_values.append(np.array([val]))
+        # ---------------------------------------------------------
+        # NUMERIC FEATURE
+        # ---------------------------------------------------------
+        num_val = float(raw_val)
+        feature_values.append(np.array([num_val]))
 
+    # Combine features into final vector
     X_full = np.hstack(feature_values)
     dmat = xgb.DMatrix(X_full.reshape(1, -1))
 
@@ -86,6 +96,7 @@ def predict_fn(data, model_artifacts):
     pred = idx_to_class[int(np.argmax(probs))]
 
     return {"prediction": pred, "probabilities": probs.tolist()}
+
 
 def output_fn(prediction, accept):
     return json.dumps(prediction)
