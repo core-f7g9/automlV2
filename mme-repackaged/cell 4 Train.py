@@ -32,11 +32,11 @@ split_step = ProcessingStep(
 )
 
 # ============================
-# Cell 5: AutoML V2 Training Steps
+# Cell 5 (FIXED): AutoML V2 Training Steps with Declared Outputs
 # ============================
 
 from sagemaker.lambda_helper import Lambda
-from sagemaker.workflow.lambda_step import LambdaStep
+from sagemaker.workflow.lambda_step import LambdaStep, LambdaOutput, LambdaOutputTypeEnum
 
 automl_lambda = Lambda(
     function_name=f"{PROJECT_NAME}-automl-v2",
@@ -47,12 +47,12 @@ automl_lambda = Lambda(
     memory_size=512
 )
 
-model_data_outputs = {}
-image_outputs      = {}
-
 train_steps = []
+model_data_outputs = {}
+image_outputs = {}
 
 for tgt in TARGET_COLS:
+
     step = LambdaStep(
         name=f"Train_{tgt}_AutoMLV2",
         lambda_func=automl_lambda,
@@ -61,10 +61,17 @@ for tgt in TARGET_COLS:
             "TrainS3": split_step.properties.ProcessingOutputConfig.Outputs[f"{tgt}_train"].S3Output.S3Uri,
             "ValS3":   split_step.properties.ProcessingOutputConfig.Outputs[f"{tgt}_val"].S3Output.S3Uri,
             "RoleArn": role_arn,
-            "OutputPath": f"s3://{BUCKET}/{OUTPUT_PREFIX}/automl-v2-xgb/{tgt}/",
-        }
+            "OutputPath": f"s3://{BUCKET}/{OUTPUT_PREFIX}/automl-v2-xgb/{tgt}/"
+        },
+        outputs=[
+            LambdaOutput(output_name="ModelDataUrl", output_type=LambdaOutputTypeEnum.String),
+            LambdaOutput(output_name="ImageUri", output_type=LambdaOutputTypeEnum.String),
+        ]
     )
+
     train_steps.append(step)
+
+    # ⭐ FIXED — These keys now exist
     model_data_outputs[tgt] = step.properties.Outputs["ModelDataUrl"]
     image_outputs[tgt]      = step.properties.Outputs["ImageUri"]
 
