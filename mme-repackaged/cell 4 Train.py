@@ -1,21 +1,30 @@
 # ============================
-# Cell 4 — Pipeline A
+# Cell 4 — Pipeline A (Corrected)
 # ============================
 
-from sagemaker.processing import ScriptProcessor, ProcessingStep, ProcessingInput, ProcessingOutput
+from sagemaker.processing import ScriptProcessor, ProcessingInput, ProcessingOutput
+from sagemaker.workflow.steps import ProcessingStep
 from sagemaker.workflow.pipeline import Pipeline
-from sagemaker.workflow.parameters import ParameterString, ParameterFloat, ParameterInteger, ParameterBoolean
-from sagemaker.xgboost.estimator import XGBoost
-from sagemaker.workflow.steps import TrainingStep, CacheConfig
+from sagemaker.workflow.parameters import (
+    ParameterString, ParameterFloat, ParameterInteger, ParameterBoolean
+)
+from sagemaker.workflow.steps import TrainingStep
 from sagemaker.workflow.step_collections import RegisterModel
+from sagemaker.workflow.pipeline_context import PipelineSession
+from sagemaker.xgboost.estimator import XGBoost
+from sagemaker.workflow.steps import CacheConfig
 
+# -------------------------------
 # Parameters
+# -------------------------------
 val_frac_param        = ParameterFloat("ValFrac", default_value=0.20)
 seed_param            = ParameterInteger("Seed", default_value=42)
 min_support_param     = ParameterInteger("MinSupport", default_value=5)
 rare_train_only_param = ParameterBoolean("RareTrainOnly", default_value=True)
 
-# Split step already defined as preprocess_hybrid.py
+# -------------------------------
+# Preprocessing (Hybrid TF-IDF)
+# -------------------------------
 sk_img = sagemaker.image_uris.retrieve("sklearn", region, "1.2-1")
 
 split_proc = ScriptProcessor(
@@ -28,13 +37,23 @@ split_proc = ScriptProcessor(
 
 processing_outputs = []
 for tgt in TARGET_COLS:
-    processing_outputs.append(ProcessingOutput(output_name=f"{tgt}_out", source=f"/opt/ml/processing/output/{tgt}"))
+    processing_outputs.append(
+        ProcessingOutput(
+            output_name=f"{tgt}_out",
+            source=f"/opt/ml/processing/output/{tgt}"
+        )
+    )
 
 split_step = ProcessingStep(
     name="HybridTFIDF_Preprocess",
     processor=split_proc,
     code="preprocess_hybrid.py",
-    inputs=[ProcessingInput(source=INPUT_S3CSV, destination="/opt/ml/processing/input")],
+    inputs=[
+        ProcessingInput(
+            source=INPUT_S3CSV,
+            destination="/opt/ml/processing/input"
+        )
+    ],
     outputs=processing_outputs,
     job_arguments=[
         "--targets_csv", ",".join(TARGET_COLS),
@@ -48,10 +67,9 @@ split_step = ProcessingStep(
     ]
 )
 
-# ------------------------------
+# -------------------------------
 # Training steps per target
-# ------------------------------
-
+# -------------------------------
 train_steps = []
 register_steps = []
 
@@ -79,15 +97,18 @@ for tgt in TARGET_COLS:
     )
     train_steps.append(train_step)
 
-    reg = RegisterModel(
+    register_step = RegisterModel(
         name=f"Register_{tgt}",
         model_data=train_step.properties.ModelArtifacts.S3ModelArtifacts,
         image_uri=xgb_estimator.image_uri,
         model_package_group_name=f"{CLIENT_NAME}-{tgt}-models",
         approval_status="Approved"
     )
-    register_steps.append(reg)
+    register_steps.append(register_step)
 
+# -------------------------------
+# Build Pipeline A
+# -------------------------------
 pipeline_a = Pipeline(
     name=f"{PROJECT_NAME}-pipeline-A",
     steps=[split_step] + train_steps + register_steps,
