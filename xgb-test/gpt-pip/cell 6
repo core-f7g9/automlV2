@@ -113,7 +113,7 @@ step_repack = ProcessingStep(
     inputs=[
         ProcessingInput(
             input_name="models_dir",
-            source=all_model_artifacts,
+            source=f"s3://{BUCKET}/{models_output}",
             destination="/opt/ml/processing/models"
         ),
         ProcessingInput(
@@ -127,11 +127,13 @@ step_repack = ProcessingStep(
             destination="/opt/ml/processing/code"
         )
     ],
-    outputs=[ProcessingOutput(
-        output_name="mme_models",
-        source="/opt/ml/processing/output",
-        destination=f"s3://{BUCKET}/{mme_output}"
-    )],
+    outputs=[
+        ProcessingOutput(
+            output_name="mme_models",
+            source="/opt/ml/processing/output",
+            destination=f"s3://{BUCKET}/{mme_output}"
+        )
+    ],
     code="repack_for_mme.py",
     depends_on=list(train_steps.values())
 )
