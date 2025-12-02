@@ -1,5 +1,5 @@
 # ============================
-# Cell 6 — Build SageMaker Pipeline (Corrected)
+# Cell 6 — Build SageMaker Pipeline (Corrected & Working)
 # ============================
 
 import os
@@ -12,11 +12,12 @@ from sagemaker.workflow.steps import ProcessingStep, TrainingStep
 from sagemaker.inputs import TrainingInput
 from sagemaker.xgboost.estimator import XGBoost
 from sagemaker.workflow.model_step import ModelStep
-from sagemaker.model import Model
 
 pipeline_session = PipelineSession()
 
-# ----------- PREPROCESS STEP -----------
+# -------------------------------
+# PREPROCESSING STEP
+# -------------------------------
 processor = ScriptProcessor(
     image_uri=sagemaker.image_uris.retrieve("sklearn", region, version="1.2-1"),
     role=role,
@@ -53,7 +54,9 @@ step_preprocess = ProcessingStep(
     ]
 )
 
-# ----------- TRAINING STEPS -----------
+# -------------------------------
+# TRAINING STEPS (1 PER TARGET)
+# -------------------------------
 models_output = f"{PROJECT_PREFIX}/trained-models"
 train_steps = {}
 
@@ -88,7 +91,9 @@ for tgt in TARGET_COLS:
 
     train_steps[tgt] = step_train
 
-# ----------- REPACK MODELS FOR MME -----------
+# -------------------------------
+# REPACK MME STEP
+# -------------------------------
 mme_output = f"{PROJECT_PREFIX}/mme-packaged"
 
 repack_processor = ScriptProcessor(
@@ -134,20 +139,28 @@ step_repack = ProcessingStep(
     ]
 )
 
-# ----------- CREATE MME MODEL STEP -----------
-mme_model = Model(
-    model_data=f"s3://{BUCKET}/{mme_output}",
-    role=role,
-    image_uri=xgb_image,
-    mode="MultiModel"
-)
+# -------------------------------
+# MODEL STEP — CREATE MULTI-MODEL CONTAINER
+# -------------------------------
+# NOTE:
+# MME requires specifying Mode="MultiModel"
+# inside the container definition passed to ModelStep
+
+mme_container = {
+    "Image": xgb_image,
+    "ModelDataUrl": f"s3://{BUCKET}/{mme_output}",
+    "Mode": "MultiModel"  # <-- Correct place for MME flag
+}
 
 step_model = ModelStep(
     name="CreateMMEModel",
-    model=mme_model
+    model=None,
+    inputs={"Model": mme_container}
 )
 
-# ----------- COMPILE PIPELINE -----------
+# -------------------------------
+# PIPELINE DEFINITION
+# -------------------------------
 pipeline = Pipeline(
     name="MultiTargetXGBPipeline",
     steps=[step_preprocess] + list(train_steps.values()) + [step_repack, step_model],
@@ -156,4 +169,4 @@ pipeline = Pipeline(
 
 pipeline.upsert(role_arn=role)
 
-print("CORRECTED PIPELINE CREATED SUCCESSFULLY")
+print("✅ Corrected Pipeline Created Successfully.")
