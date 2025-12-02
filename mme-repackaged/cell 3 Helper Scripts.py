@@ -1,58 +1,50 @@
 # ============================================================
-# Cell 3: Write all helper scripts for AutoML + best-candidate extraction + MME repack
+# Cell 3: Helper scripts for AutoML search + config extraction + MME repack
 # ============================================================
 import textwrap
 
 # ------------------------------------------------------------
-# Script 1: run_automl_xgb.py 
+# Script 1: run_automl_xgb.py  (AutoML hyperparameter search only)
 # ------------------------------------------------------------
 run_automl = textwrap.dedent("""
-import boto3, json, time, argparse, os
+import boto3, json, time, argparse
 
 def wait(sm, job_name):
     print(f"[INFO] Waiting for AutoML job: {job_name}")
     while True:
-        resp = sm.describe_auto_ml_job(AutoMLJobName=job_name)
-        status = resp["AutoMLJobStatus"]
-        sec = resp["AutoMLJobSecondaryStatus"]
+        desc = sm.describe_auto_ml_job(AutoMLJobName=job_name)
+        status = desc["AutoMLJobStatus"]
+        sec    = desc["AutoMLJobSecondaryStatus"]
         print(f"  Status: {status} / {sec}")
-        if status in ("Failed","Stopped"):
-            raise RuntimeError(f"AutoML job {job_name} failed.")
+        if status in ("Failed", "Stopped"):
+            raise RuntimeError(f"AutoML job {job_name} failed: {desc}")
         if status == "Completed":
             print("[INFO] AutoML Completed.")
-            return resp
-        time.sleep(30)
-
-def get_best_candidate(desc):
-    cands = desc.get("BestCandidate", None)
-    if not cands:
-        raise RuntimeError("No BestCandidate found in AutoML response.")
-    return cands
+            return desc
+        time.sleep(20)
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--job_name", type=str, required=True)
-    p.add_argument("--train_s3_uri", type=str, required=True)
-    p.add_argument("--target_col", type=str, required=True)
-    p.add_argument("--role_arn", type=str, required=True)
-    p.add_argument("--output_prefix", type=str, required=True)
+    p.add_argument("--job_name", required=True)
+    p.add_argument("--train_s3_uri", required=True)
+    p.add_argument("--target_col", required=True)
+    p.add_argument("--output_prefix", required=True)
+    p.add_argument("--role", required=True)
     args = p.parse_args()
 
     sm = boto3.client("sagemaker")
 
     # Force AutoML to XGBoost only
     cfg = {
-        "CompletionCriteria": {
-            "MaxCandidates": 5,
-            "MaxAutoMLJobRuntimeInSeconds": 3600
-        },
-        "SecurityConfig": {},
         "AlgorithmsConfig": [
             {"AutoMLAlgorithms": ["XGBOOST"]}
-        ]
+        ],
+        "CompletionCriteria": {
+            "MaxCandidates": 5
+        }
     }
 
-    print("[INFO] Starting AutoML XGBoost-only job:", args.job_name)
+    print(f"[INFO] Starting AutoML XGBoost-only job {args.job_name}")
 
     sm.create_auto_ml_job(
         AutoMLJobName=args.job_name,
@@ -62,28 +54,26 @@ def main():
                 "DataSource": {
                     "S3DataSource": {
                         "S3DataType": "S3Prefix",
-                        "S3Uri": args.train_s3_uri
+                        "S3Uri": args.train_s3_uri,
                     }
                 },
-                "TargetAttributeName": args.target_col
+                "TargetAttributeName": args.target_col,
             }
         ],
         OutputDataConfig={"S3OutputPath": args.output_prefix},
-        RoleArn=args.role_arn,
+        RoleArn=args.role,
         ProblemType="MulticlassClassification"
     )
 
     desc = wait(sm, args.job_name)
-    best = get_best_candidate(desc)
 
-    # Save best candidate JSON
-    out_path = "best_candidate.json"
-    with open(out_path, "w") as f:
+    best = desc["BestCandidate"]
+
+    with open("automl_best.json", "w") as f:
         json.dump(best, f)
-    print("[INFO] Wrote best_candidate.json")
 
-    # Pass path to pipeline
-    print(out_path)
+    # This is what the ProcessingStep will capture as output
+    print("automl_best.json")
 
 if __name__ == "__main__":
     main()
@@ -94,94 +84,108 @@ with open("run_automl_xgb.py", "w") as f:
 
 
 # ------------------------------------------------------------
-# Script 2: extract_best_candidate.py
+# Script 2: extract_automl_config.py
+# Extract hyperparameters + feature engineering config
 # ------------------------------------------------------------
-extract_best = textwrap.dedent("""
-import boto3, json, argparse, os
+extract_automl_config = textwrap.dedent("""
+import json, argparse
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--best_json", type=str, required=True)
+    p.add_argument("--best_json", required=True)
     args = p.parse_args()
 
     with open(args.best_json, "r") as f:
         best = json.load(f)
 
-    model_artifact = best["InferenceContainers"][0]["ModelDataUrl"]
-    image_uri      = best["InferenceContainers"][0]["Image"]
+    # Hyperparameters chosen by AutoML
+    hp = best["CandidateProperties"].get("CandidateMetrics", [{}])[0].get("HyperParameters", {})
 
-    # Write to text files for downstream step
-    with open("model_artifact.txt","w") as f:
-        f.write(model_artifact)
-    with open("image_uri.txt","w") as f:
-        f.write(image_uri)
+    # Feature-engineering transformation map (if present)
+    fe = best["CandidateProperties"].get("FeatureEngineering", {})
 
-    print("model_artifact.txt")
-    print("image_uri.txt")
+    with open("hyperparams.json", "w") as f:
+        json.dump(hp, f)
+
+    with open("feature_eng.json", "w") as f:
+        json.dump(fe, f)
+
+    print("hyperparams.json")
+    print("feature_eng.json")
 
 if __name__ == "__main__":
     main()
 """).strip()
 
-with open("extract_best_candidate.py","w") as f:
-    f.write(extract_best)
+with open("extract_automl_config.py", "w") as f:
+    f.write(extract_automl_config)
 
 
 # ------------------------------------------------------------
-# Script 3: inference.py (generic handler)
+# Script 3: inference.py  (MME-compatible XGBoost handler)
 # ------------------------------------------------------------
 inference_script = textwrap.dedent("""
-import os, json, pickle
-import numpy as np
+import json, os
+import xgboost as xgb
 import pandas as pd
 
 def model_fn(model_dir):
-    # Load XGBoost or sklearn model
-    import joblib
-    model = joblib.load(os.path.join(model_dir, "model.joblib"))
-    return model
+    model_path = os.path.join(model_dir, "model.xgb")
+    bst = xgb.Booster()
+    bst.load_model(model_path)
+    return bst
 
 def input_fn(request_body, request_content_type):
-    if request_content_type == "application/json":
-        data = json.loads(request_body)
-        return pd.DataFrame(data)
-    raise ValueError("Unsupported content type: {}".format(request_content_type))
+    # Request is JSON: {"col1": [...], "col2": [...]} or a list of dicts
+    payload = json.loads(request_body)
+    df = pd.DataFrame(payload)
+    return df
 
 def predict_fn(input_data, model):
-    preds = model.predict(input_data)
-    return preds
+    dtest = xgb.DMatrix(input_data)
+    preds = model.predict(dtest)
+    return preds.tolist()
 
 def output_fn(prediction, response_content_type):
-    if response_content_type == "application/json":
-        return json.dumps(prediction.tolist())
-    raise ValueError("Unsupported response content type: {}".format(response_content_type))
+    return json.dumps(prediction)
 """).strip()
 
-with open("inference.py","w") as f:
+with open("inference.py", "w") as f:
     f.write(inference_script)
 
 
 # ------------------------------------------------------------
 # Script 4: repack_for_mme.py
+# Repack XGB model + inference.py → model_mme.tar.gz
 # ------------------------------------------------------------
-repack = textwrap.dedent("""
-import tarfile, argparse, os, shutil
+repack_script = textwrap.dedent("""
+import argparse, tarfile, shutil, os
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--model_artifact", type=str, required=True)
-    p.add_argument("--inference_script", type=str, default="inference.py")
+    p.add_argument("--trained_model_s3", required=True)
+    p.add_argument("--inference_script", default="inference.py")
     args = p.parse_args()
 
-    # Extract AutoML model tar
+    # Make local workspace
     os.makedirs("model", exist_ok=True)
-    with tarfile.open(args.model_artifact, "r:gz") as t:
+
+    # Auto-download SageMaker model.tar.gz
+    import boto3
+    s3 = boto3.client("s3")
+
+    bucket, key = args.trained_model_s3.replace("s3://","").split("/",1)
+    local_tar = "model.tar.gz"
+    s3.download_file(bucket, key, local_tar)
+
+    # Extract
+    with tarfile.open(local_tar, "r:gz") as t:
         t.extractall("model")
 
     # Copy inference script
     shutil.copy(args.inference_script, "model/inference.py")
 
-    # Repack for MME
+    # Write final tar
     out_path = "model_mme.tar.gz"
     with tarfile.open(out_path, "w:gz") as t:
         t.add("model", arcname=".")
@@ -191,7 +195,11 @@ if __name__ == "__main__":
     main()
 """).strip()
 
-with open("repack_for_mme.py","w") as f:
-    f.write(repack)
+with open("repack_for_mme.py", "w") as f:
+    f.write(repack_script)
 
-print("Scripts written: run_automl_xgb.py, extract_best_candidate.py, inference.py, repack_for_mme.py")
+print("Scripts written:")
+print("- run_automl_xgb.py")
+print("- extract_automl_config.py")
+print("- inference.py")
+print("- repack_for_mme.py")
