@@ -1,50 +1,53 @@
 # ----------------------------------------------------------------------------
 # STEP 4: Train XGBoost using AutoML hyperparameters
 # ----------------------------------------------------------------------------
-clean_hp_uri = f"{DATA_PREFIX}/hp_clean/{tgt}/clean_hp.json"
+import boto3
+import sagemaker
+from sagemaker.workflow.pipeline_context import PipelineSession
+from sagemaker.workflow.steps import TrainingStep
+from sagemaker.inputs import TrainingInput
+from sagemaker.xgboost.estimator import XGBoost
 
-# Load hyperparameters dynamically via pipeline property file
-from sagemaker.workflow.properties import PropertyFile
+region = boto3.Session().region_name
+pipeline_session = pipeline_session if "pipeline_session" in globals() else PipelineSession()
+steps = steps if "steps" in globals() else []
 
-hp_prop_file = PropertyFile(
-    name=f"CleanHPFile_{tgt}",
-    output_name="clean_hp",
-    path="clean_hp.json"
-)
+for tgt in TARGET_COLS:
+    clean_hp_uri = f"{DATA_PREFIX}/hp_clean/{tgt}/clean_hp.json"
 
-# The Estimator will receive these hyperparameters at runtime
-xgb_estimator = Estimator(
-    image_uri=XGB_IMAGE,
-    role=role,
-    instance_type="ml.m5.large",
-    instance_count=1,
-    output_path=f"{DATA_PREFIX}/xgb/{tgt}",
-    sagemaker_session=pipeline_session,
-)
+    xgb_image = sagemaker.image_uris.retrieve("xgboost", region, version="1.3-1")
+    xgb_estimator = XGBoost(
+        image_uri=xgb_image,
+        entry_point="train_xgb.py",
+        source_dir=".",
+        role=role,
+        instance_type="ml.m5.large",
+        instance_count=1,
+        output_path=f"{DATA_PREFIX}/xgb/{tgt}",
+        sagemaker_session=pipeline_session,
+        framework_version="1.3-1",
+        py_version="py3",
+    )
 
-# Set hyperparameters automatically using pipeline property file
-xgb_estimator.set_hyperparameters(
-    **{
-        # Pipeline property reference:
-        # Loaded as JSON dict from clean_hp.json
-        "hp": step_load_hp.properties.ProcessingOutputConfig.Outputs["clean_hp"].S3Output.S3Uri
-    }
-)
+    hp_source = clean_hp_uri
+    if "step_load_hp" in globals():
+        hp_source = step_load_hp.properties.ProcessingOutputConfig.Outputs["clean_hp"].S3Output.S3Uri
 
-step_train = TrainingStep(
-    name=f"TrainXGB_{tgt}",
-    estimator=xgb_estimator,
-    inputs={
-        "train": TrainingInput(
-            s3_data=f"{DATA_PREFIX}/splits/{tgt}/train/train.csv",
-            content_type="text/csv"
-        ),
-        "validation": TrainingInput(
-            s3_data=f"{DATA_PREFIX}/splits/{tgt}/validation/validation.csv",
-            content_type="text/csv"
-        )
-    },
-    property_files=[hp_prop_file]
-)
+    xgb_estimator.set_hyperparameters(hp=hp_source)
 
-steps.append(step_train)
+    step_train = TrainingStep(
+        name=f"TrainXGB_{tgt}",
+        estimator=xgb_estimator,
+        inputs={
+            "train": TrainingInput(
+                s3_data=f"{DATA_PREFIX}/splits/{tgt}/train.csv",
+                content_type="text/csv"
+            ),
+            "validation": TrainingInput(
+                s3_data=f"{DATA_PREFIX}/splits/{tgt}/val.csv",
+                content_type="text/csv"
+            )
+        }
+    )
+
+    steps.append(step_train)
