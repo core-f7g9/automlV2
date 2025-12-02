@@ -92,8 +92,7 @@ for tgt in TARGET_COLS:
     train_step = TrainingStep(
         name=f"Train_{tgt}",
         estimator=xgb_estimator,
-        inputs={"data": data_channel},
-        cache_config=CacheConfig(enable_caching=False)
+        inputs={"data": data_channel}
     )
     train_steps.append(train_step)
 
@@ -101,6 +100,8 @@ for tgt in TARGET_COLS:
         name=f"Register_{tgt}",
         model_data=train_step.properties.ModelArtifacts.S3ModelArtifacts,
         image_uri=xgb_estimator.image_uri,
+        content_types=["application/json"],      # FIXED
+        response_types=["application/json"],     # FIXED
         model_package_group_name=f"{CLIENT_NAME}-{tgt}-models",
         approval_status="Approved"
     )
