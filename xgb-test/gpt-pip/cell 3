@@ -5,42 +5,45 @@ import os
 import numpy as np
 
 def main():
-    # Fixed SageMaker channel paths for libsvm data
     train_path = "/opt/ml/input/data/train/train.libsvm"
     val_path   = "/opt/ml/input/data/val/val.libsvm"
     model_dir  = "/opt/ml/model"
     os.makedirs(model_dir, exist_ok=True)
 
     # -----------------------------
-    # Load LIBSVM sparse data
+    # Load sparse LIBSVM
     # -----------------------------
     dtrain = xgb.DMatrix(train_path)
     dval   = xgb.DMatrix(val_path)
 
-    # -----------------------------
-    # Determine num_class dynamically
-    # -----------------------------
-    train_labels = dtrain.get_label()
-    unique_classes = sorted(set(train_labels))
-    num_class = len(unique_classes)
+    y_train = dtrain.get_label()
+    y_val   = dval.get_label()
 
-    # Map original label values -> 0..K-1
-    class_map = {str(cls): int(i) for i, cls in enumerate(unique_classes)}
+    # -----------------------------
+    # Build class map from union of labels across train + val
+    # -----------------------------
+    all_classes = sorted(set(list(y_train) + list(y_val)))
+    class_map = {str(cls): i for i, cls in enumerate(all_classes)}
 
-    # Save class map for inference
+    # Save class map
     with open(os.path.join(model_dir, "class_map.json"), "w") as f:
         json.dump(class_map, f, indent=2)
 
+    # -----------------------------
+    # Encode labels using class_map
+    # -----------------------------
     def encode_labels(dmat):
-        y = dmat.get_label()
-        mapped = np.array([class_map[str(lbl)] for lbl in y])
+        raw = dmat.get_label()
+        mapped = np.array([class_map[str(lbl)] for lbl in raw])
         dmat.set_label(mapped)
 
     encode_labels(dtrain)
     encode_labels(dval)
 
+    num_class = len(class_map)
+
     # -----------------------------
-    # Train XGBoost multi-class model
+    # Train multi-class XGBoost
     # -----------------------------
     params = {
         "objective": "multi:softprob",
@@ -64,7 +67,7 @@ def main():
     # Save model
     # -----------------------------
     booster.save_model(os.path.join(model_dir, "xgboost-model"))
-    print("✅ Training complete.")
+    print("✅ Training complete — union-of-classes mapping used.")
 
 if __name__ == "__main__":
     main()
