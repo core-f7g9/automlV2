@@ -53,24 +53,24 @@ image_outputs = {}
 
 for tgt in TARGET_COLS:
 
-    # ⭐ ProcessingStep outputs MUST match these names:
-    train_output = split_step.properties.ProcessingOutputConfig.Outputs[f"train_{tgt}"].S3Output.S3Uri
-    val_output   = split_step.properties.ProcessingOutputConfig.Outputs[f"validation_{tgt}"].S3Output.S3Uri
+    # ⭐ FIX: Correct output names
+    train_output = split_step.properties.ProcessingOutputConfig.Outputs[f"{tgt}_train"].S3Output.S3Uri
+    val_output   = split_step.properties.ProcessingOutputConfig.Outputs[f"{tgt}_val"].S3Output.S3Uri
 
     step = LambdaStep(
         name=f"Train_{tgt}_AutoMLV2",
         lambda_func=automl_lambda,
         inputs={
             "Target": tgt,
-            "TrainS3": train_output,        # ⭐ VALID expression
-            "ValS3":   val_output,          # ⭐ VALID expression
+            "TrainS3": train_output,
+            "ValS3": val_output,
             "RoleArn": role_arn,
             "OutputPath": f"s3://{BUCKET}/{OUTPUT_PREFIX}/automl-v2-xgb/{tgt}/"
         },
         outputs=[
             LambdaOutput("ModelDataUrl", output_type=LambdaOutputTypeEnum.String),
-            LambdaOutput("ImageUri", output_type=LambdaOutputTypeEnum.String)
-        ]
+            LambdaOutput("ImageUri", output_type=LambdaOutputTypeEnum.String),
+        ],
     )
 
     train_steps.append(step)
