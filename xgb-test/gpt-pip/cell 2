@@ -9,11 +9,9 @@ import json
 from sklearn.feature_extraction.text import HashingVectorizer
 from sklearn.preprocessing import LabelEncoder
 from scipy import sparse
+from sklearn.datasets import dump_svmlight_file
 
 
-# -----------------------------
-# Parse arguments
-# -----------------------------
 parser = argparse.ArgumentParser()
 parser.add_argument("--input_dir")
 parser.add_argument("--targets")
@@ -29,50 +27,44 @@ hash_dim = int(args.tfidf_max_features)
 
 os.makedirs(output_dir, exist_ok=True)
 
-
 # -----------------------------
-# Auto-detect CSV
+# Load dataset
 # -----------------------------
 csv_files = glob.glob(os.path.join(args.input_dir, "*.csv"))
 if not csv_files:
-    raise FileNotFoundError(f"No CSV found in {args.input_dir}")
+    raise FileNotFoundError("No CSV found")
 
-input_csv = csv_files[0]
-print(f"📄 Using input CSV: {input_csv}")
-
-df = pd.read_csv(input_csv)
-
+df = pd.read_csv(csv_files[0])
 
 # -----------------------------
-# Validate required columns
+# Validate columns
 # -----------------------------
 missing = [c for c in input_features + targets if c not in df.columns]
 if missing:
-    raise ValueError(f"Dataset missing required columns: {missing}")
+    raise ValueError(f"Missing required columns: {missing}")
 
 
 # -----------------------------
-# Build dynamic feature pipeline
+# Build sparse feature blocks
 # -----------------------------
 feature_blocks = []
 feature_pipeline = []
-
+encoders = {}
 
 for feat in input_features:
     col = df[feat]
 
-    # TEXT FEATURES
+    # TEXT → HASHING
     if col.dtype == object and (
-        "desc" in feat.lower() or "text" in feat.lower() or "line" in feat.lower()
+        "text" in feat.lower() or
+        "desc" in feat.lower() or
+        "line" in feat.lower()
     ):
-        print(f"🔹 HashingVectorizer text feature: {feat}")
-
         vec = HashingVectorizer(
             n_features=hash_dim,
             alternate_sign=False,
             norm=None
         )
-
         X = vec.transform(col.fillna("").astype(str))
         feature_blocks.append(X)
 
@@ -83,16 +75,14 @@ for feat in input_features:
         })
         continue
 
-    # CATEGORICAL FEATURES
+    # CATEGORICAL → LABELENC
     if col.dtype == object:
-        print(f"🔹 Label encoding categorical: {feat}")
-
         enc = LabelEncoder()
         df[feat] = df[feat].fillna("").astype(str)
-        y = enc.fit_transform(df[feat])
+        encoded = enc.fit_transform(df[feat])
+        encoders[feat] = enc
 
-        # encode as sparse column
-        X = sparse.csr_matrix(y.reshape(-1, 1))
+        X = sparse.csr_matrix(encoded.reshape(-1, 1))
         feature_blocks.append(X)
 
         enc_file = f"labelenc_{feat}.pkl"
@@ -105,8 +95,7 @@ for feat in input_features:
         })
         continue
 
-    # NUMERIC FEATURES
-    print(f"🔹 Numeric feature: {feat}")
+    # NUMERIC
     y = pd.to_numeric(col.fillna(0), errors="coerce").fillna(0).values.reshape(-1, 1)
     X = sparse.csr_matrix(y)
     feature_blocks.append(X)
@@ -118,55 +107,42 @@ for feat in input_features:
 
 
 # -----------------------------
-# Merge sparse feature blocks → sparse matrix
+# Merge sparse blocks
 # -----------------------------
-X_full = sparse.hstack(feature_blocks).tocsr()
+X_full = sparse.hstack(feature_blocks).tocsr()   # <-- stays sparse ALWAYS
 
 
 # -----------------------------
 # Save metadata
 # -----------------------------
-meta = {
-    "feature_pipeline": feature_pipeline,
-    "targets": targets
-}
-
+meta = {"feature_pipeline": feature_pipeline, "targets": targets}
 with open(os.path.join(output_dir, "preprocess_meta.json"), "w") as f:
     json.dump(meta, f, indent=2)
 
 
 # -----------------------------
-# Create per-target splits
+# Per-target splitting (STILL SPARSE)
 # -----------------------------
-X_full_np = X_full.toarray()   # final materialization only ONCE
-
 for tgt in targets:
-    print(f"🔧 Processing target: {tgt}")
-
-    df_t = df[df[tgt].notna()].copy()
-    y_t = df_t[tgt].astype(str).values
 
     mask = df[tgt].notna().values
-    X_t = X_full_np[mask]
+    y_all = df.loc[mask, tgt].astype(str).values
 
-    n = len(y_t)
+    X_t = X_full[mask]   # sparse slice, SAFE
+
+    n = len(y_all)
     cut = int(n * 0.8)
 
     X_train = X_t[:cut]
-    y_train = y_t[:cut]
+    y_train = y_all[:cut]
 
     X_val = X_t[cut:]
-    y_val = y_t[cut:]
+    y_val = y_all[cut:]
 
     tgt_dir = os.path.join(output_dir, tgt)
     os.makedirs(tgt_dir, exist_ok=True)
 
-    train_df = pd.DataFrame(X_train)
-    train_df["label"] = y_train
-    train_df.to_csv(os.path.join(tgt_dir, "train.csv"), index=False)
+    dump_svmlight_file(X_train, y_train, os.path.join(tgt_dir, "train.libsvm"))
+    dump_svmlight_file(X_val,   y_val,   os.path.join(tgt_dir, "val.libsvm"))
 
-    val_df = pd.DataFrame(X_val)
-    val_df["label"] = y_val
-    val_df.to_csv(os.path.join(tgt_dir, "val.csv"), index=False)
-
-print("✅ Preprocess complete. HashingVectorizer + metadata saved.")
+print("✅ Preprocess complete — fully sparse, no dense memory usage.")

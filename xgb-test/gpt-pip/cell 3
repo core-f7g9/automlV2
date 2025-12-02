@@ -1,72 +1,80 @@
 %%writefile train.py
-import pandas as pd
-import xgboost as xgb
+import argparse
 import json
+import xgboost as xgb
 import os
+import numpy as np
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--train_path")
+    parser.add_argument("--val_path")
+    parser.add_argument("--model_dir")
+    args = parser.parse_args()
 
-    # -------------------------
-    # Load training and val CSV
-    # -------------------------
-    train_path = "/opt/ml/input/data/train/train.csv"
-    val_path   = "/opt/ml/input/data/val/val.csv"
-    model_dir  = "/opt/ml/model"
+    train_path = args.train_path
+    val_path = args.val_path
+    model_dir = args.model_dir
+    os.makedirs(model_dir, exist_ok=True)
 
-    train = pd.read_csv(train_path)
-    val   = pd.read_csv(val_path)
+    # -----------------------------
+    # Load LIBSVM sparse data
+    # -----------------------------
+    dtrain = xgb.DMatrix(train_path)
+    dval   = xgb.DMatrix(val_path)
 
-    y_train = train["label"]
-    y_val   = val["label"]
+    # -----------------------------
+    # Determine num_class dynamically
+    # -----------------------------
+    train_labels = dtrain.get_label()
+    unique_classes = sorted(set(train_labels))
+    num_class = len(unique_classes)
 
-    X_train = train.drop(columns=["label"]).values
-    X_val   = val.drop(columns=["label"]).values
+    class_map = {str(cls): int(i) for i, cls in enumerate(unique_classes)}
+    inv_map = {v: k for k, v in class_map.items()}
 
-    # -------------------------
-    # Encode labels (0..num_class-1)
-    # -------------------------
-    classes = sorted(y_train.unique())
-    class_to_idx = {c: i for i, c in enumerate(classes)}
+    # Save class map for inference
+    with open(os.path.join(model_dir, "class_map.json"), "w") as f:
+        json.dump(class_map, f, indent=2)
 
-    y_train_idx = y_train.map(class_to_idx)
-    y_val_idx   = y_val.map(class_to_idx)
+    # -----------------------------
+    # Re-map labels to 0..num_class-1
+    # -----------------------------
+    def encode_labels(dmat):
+        y = dmat.get_label()
+        mapped = np.array([class_map[str(lbl)] for lbl in y])
+        dmat.set_label(mapped)
 
-    num_class = len(classes)
+    encode_labels(dtrain)
+    encode_labels(dval)
 
-    dtrain = xgb.DMatrix(X_train, label=y_train_idx)
-    dval   = xgb.DMatrix(X_val, label=y_val_idx)
+    # -----------------------------
+    # Train model
+    # -----------------------------
+    params = {
+        "objective": "multi:softprob",
+        "num_class": num_class,
+        "eval_metric": "mlogloss",
+        "tree_method": "hist",
+        "max_depth": 8,
+        "eta": 0.2
+    }
 
-    # -------------------------
-    # Hyperparameters
-    # -------------------------
-    params = dict(
-        objective="multi:softprob",
-        eval_metric="mlogloss",
-        num_class=num_class,
-        max_depth=8,
-        eta=0.2,
-        subsample=0.8,
-        colsample_bytree=0.8
-    )
+    watchlist = [(dtrain, "train"), (dval, "validation")]
 
-    # -------------------------
-    # Train
-    # -------------------------
-    model = xgb.train(
+    booster = xgb.train(
         params=params,
         dtrain=dtrain,
         num_boost_round=200,
-        evals=[(dval, "validation")]
+        evals=watchlist,
     )
 
-    # -------------------------
-    # Save model + class map
-    # -------------------------
-    os.makedirs(model_dir, exist_ok=True)
-    model.save_model(os.path.join(model_dir, "xgboost-model"))
+    # -----------------------------
+    # Save model
+    # -----------------------------
+    booster.save_model(os.path.join(model_dir, "xgboost-model"))
 
-    with open(os.path.join(model_dir, "class_map.json"), "w") as f:
-        json.dump(class_to_idx, f)
+    print("Training complete!")
 
 if __name__ == "__main__":
     main()
