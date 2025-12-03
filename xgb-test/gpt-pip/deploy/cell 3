@@ -1,3 +1,12 @@
+from sagemaker.predictor import Predictor
+
+predictor = Predictor(
+    endpoint_name=ENDPOINT_NAME,
+    sagemaker_session=sm_sess
+)
+
+print("Reattached Predictor:", predictor.endpoint_name)
+
 # ============================
 # CELL A5 — Invoke Endpoint
 # ============================
