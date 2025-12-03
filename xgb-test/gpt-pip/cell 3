@@ -5,12 +5,11 @@ import os
 import numpy as np
 
 def main():
-    train_path = "/opt/ml/input/data/train/train"
-    val_path   = "/opt/ml/input/data/val/val"
+    train_path = "/opt/ml/input/data/train/train.libsvm"
+    val_path   = "/opt/ml/input/data/validation/val.libsvm"
     model_dir  = "/opt/ml/model"
     os.makedirs(model_dir, exist_ok=True)
 
-    # Load LIBSVM files
     dtrain = xgb.DMatrix(train_path)
     dval   = xgb.DMatrix(val_path)
 
@@ -37,7 +36,7 @@ def main():
         "eval_metric": "mlogloss",
         "tree_method": "hist",
         "max_depth": 8,
-        "eta": 0.2,
+        "eta": 0.2
     }
 
     booster = xgb.train(
@@ -48,7 +47,6 @@ def main():
     )
 
     booster.save_model(os.path.join(model_dir, "xgboost-model"))
-    print("Saved model into", model_dir)
 
 if __name__ == "__main__":
     main()

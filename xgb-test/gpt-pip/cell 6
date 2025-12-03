@@ -86,10 +86,17 @@ for tgt in TARGET_COLS:
         name=f"Train_{tgt}",
         estimator=estimator,
         inputs={
-            "train": TrainingInput(s3_data=train_path, content_type="text/libsvm"),
-            "val":   TrainingInput(s3_data=val_path,   content_type="text/libsvm"),
+            "train": TrainingInput(
+                s3_data=train_path,
+                content_type="text/libsvm"
+            ),
+            "validation": TrainingInput(
+                s3_data=val_path,
+                content_type="text/libsvm"
+            )
         }
     )
+
 
     train_steps[tgt] = step_train
 
