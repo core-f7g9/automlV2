@@ -1,0 +1,7 @@
+# ============================
+# CELL A7 — Cleanup
+# ============================
+predictor.delete_endpoint()
+mme.delete_model()
+
+print("Cleaned up MME endpoint and model.")

@@ -1,0 +1,38 @@
+# ============================
+# CELL A5 — Invoke Endpoint
+# ============================
+import json
+
+sample_payload = {
+    "VendorName": "Acme Corp",
+    "LineDescription": "Office supplies monthly invoice",
+    "ClubNumber": 123
+}
+
+# choose one of the packaged models
+target_model = "DepartmentCode.tar.gz"
+
+response = predictor.predict(
+    json.dumps(sample_payload),
+    target_model=target_model
+)
+
+print("Raw response:", response)
+
+# ============================
+# CELL A6 — Test all target models
+# ============================
+targets = [
+    "DepartmentCode.tar.gz",
+    "AccountCode.tar.gz",
+    "SubAccountCode.tar.gz",
+    "LocationCode.tar.gz"
+]
+
+for m in targets:
+    print("\n===== Testing:", m, "=====")
+    resp = predictor.predict(
+        json.dumps(sample_payload),
+        target_model=m
+    )
+    print(resp)

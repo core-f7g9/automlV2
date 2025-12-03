@@ -1,0 +1,29 @@
+# ============================
+# CELL A3 — Create MultiDataModel container
+# ============================
+container_uri = sagemaker.image_uris.retrieve(
+    framework="xgboost",
+    region=region,
+    version="1.5-1"
+)
+
+mme = MultiDataModel(
+    name=MODEL_NAME,
+    model_data_prefix=MME_S3,   # S3 folder containing all .tar.gz models
+    image_uri=container_uri,
+    role=role,
+    sagemaker_session=sm_sess
+)
+
+print("MultiDataModel created:", MODEL_NAME)
+
+# ============================
+# CELL A4 — Deploy Multi-Model Endpoint
+# ============================
+predictor = mme.deploy(
+    initial_instance_count=1,
+    instance_type="ml.m5.xlarge",
+    endpoint_name=ENDPOINT_NAME
+)
+
+print("MME Endpoint deployed:", ENDPOINT_NAME)

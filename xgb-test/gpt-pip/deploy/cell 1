@@ -1,0 +1,39 @@
+# ============================
+# CELL A1 — Imports & Config
+# ============================
+import boto3
+import sagemaker
+from sagemaker.multidatamodel import MultiDataModel
+
+region = boto3.Session().region_name
+sm_sess = sagemaker.Session()
+role = sagemaker.get_execution_role()
+
+# IMPORTANT: Set this to whatever you used in the pipeline
+PROJECT_PREFIX = "multi-target-xgb"    # or PROJECT_NAME if you used that
+
+BUCKET = sm_sess.default_bucket()
+
+# MME packaged models location (from repack_for_mme output)
+MME_PREFIX = f"{PROJECT_PREFIX}/mme-packaged"
+MME_S3 = f"s3://{BUCKET}/{MME_PREFIX}"
+
+ENDPOINT_NAME = "multi-target-xgb-mme-endpoint"
+MODEL_NAME = "multi-target-xgb-mme-model"
+
+print("Region:", region)
+print("Bucket:", BUCKET)
+print("MME Model Prefix:", MME_PREFIX)
+
+# ============================
+# CELL A2 — List packaged model tarballs
+# ============================
+import boto3
+
+s3 = boto3.client("s3")
+
+resp = s3.list_objects_v2(Bucket=BUCKET, Prefix=MME_PREFIX)
+
+print("Packaged model files:\n")
+for obj in resp.get("Contents", []):
+    print(" -", obj["Key"])
