@@ -9,13 +9,34 @@ def safe_extract_tar(path, dest):
     if not os.path.exists(path):
         print(f"[WARN] Missing tar file: {path}")
         return False
-    with tarfile.open(path, "r:gz") as tar:
-        tar.extractall(dest)
-    return True
+    try:
+        with tarfile.open(path, "r:gz") as tar:
+            tar.extractall(dest)
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to extract {path}: {e}")
+        return False
 
-def pack(dir_path, out_tar):
-    with tarfile.open(out_tar, "w:gz") as tar:
-        tar.add(dir_path, arcname=".")
+def find_model_tar(tgt_dir):
+    """
+    Fully exhaustive search for model.tar.gz across all SageMaker directory patterns.
+    """
+    candidates = []
+
+    # The two most common locations
+    candidates.append(os.path.join(tgt_dir, "model.tar.gz"))
+    candidates.append(os.path.join(tgt_dir, "output", "model.tar.gz"))
+
+    # Deep recursive search
+    candidates.extend(
+        glob.glob(os.path.join(tgt_dir, "**", "model.tar.gz"), recursive=True)
+    )
+
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+
+    return None
 
 def main():
     parser = argparse.ArgumentParser()
@@ -26,43 +47,75 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
+    # preprocessing artifacts
     preprocess_artifacts = glob.glob(os.path.join(args.preprocess_dir, "labelenc_*.pkl"))
     meta_file = os.path.join(args.preprocess_dir, "preprocess_meta.json")
 
+    inference_script = "/opt/ml/processing/code/inference.py"
+
+    packaged = 0
+
     for tgt in os.listdir(args.models_dir):
-        tgt_model_dir = os.path.join(args.models_dir, tgt)
-        if not os.path.isdir(tgt_model_dir):
+        tgt_dir = os.path.join(args.models_dir, tgt)
+        if not os.path.isdir(tgt_dir):
             continue
 
-        # CORRECT path to SageMaker training model tar
-        model_tar = os.path.join(tgt_model_dir, "output", "model.tar.gz")
+        print(f"\n=== Processing target: {tgt} ===")
 
-        extract_dir = os.path.join(tgt_model_dir, "extracted")
+        model_tar = find_model_tar(tgt_dir)
+        if not model_tar:
+            print(f"[ERROR] model.tar.gz not found under {tgt_dir}")
+            print("Directory contents:", os.listdir(tgt_dir))
+            continue
+
+        print(f"[INFO] Found model archive: {model_tar}")
+
+        extract_dir = os.path.join(tgt_dir, "extract")
         os.makedirs(extract_dir, exist_ok=True)
 
-        safe_extract_tar(model_tar, extract_dir)
+        if not safe_extract_tar(model_tar, extract_dir):
+            print(f"[ERROR] Could not extract: {model_tar}")
+            continue
 
+        # Extracted model artifacts
         xgb_model = os.path.join(extract_dir, "xgboost-model")
         class_map = os.path.join(extract_dir, "class_map.json")
 
-        packaging_dir = os.path.join(args.output_dir, tgt)
-        os.makedirs(packaging_dir, exist_ok=True)
+        if not os.path.exists(xgb_model):
+            print(f"[ERROR] xgboost-model missing inside model.tar.gz!")
+            continue
 
-        shutil.copy(xgb_model, packaging_dir)
-        shutil.copy(class_map, packaging_dir)
+        if not os.path.exists(class_map):
+            print(f"[ERROR] class_map.json missing inside model.tar.gz!")
+            continue
+
+        # Build package directory
+        pkg_dir = os.path.join(args.output_dir, tgt)
+        os.makedirs(pkg_dir, exist_ok=True)
+
+        shutil.copy(xgb_model, pkg_dir)
+        shutil.copy(class_map, pkg_dir)
 
         if os.path.exists(meta_file):
-            shutil.copy(meta_file, packaging_dir)
+            shutil.copy(meta_file, pkg_dir)
 
-        for art in preprocess_artifacts:
-            shutil.copy(art, packaging_dir)
+        for enc in preprocess_artifacts:
+            shutil.copy(enc, pkg_dir)
 
-        shutil.copy("inference.py", packaging_dir)
+        # Copy inference.py in code/
+        code_dir = os.path.join(pkg_dir, "code")
+        os.makedirs(code_dir, exist_ok=True)
+        shutil.copy(inference_script, os.path.join(code_dir, "inference.py"))
 
+        # Final tarball
         out_tar = os.path.join(args.output_dir, f"{tgt}.tar.gz")
-        pack(packaging_dir, out_tar)
+        with tarfile.open(out_tar, "w:gz") as tar:
+            tar.add(pkg_dir, arcname=".")
 
-        print(f"Packaged MME model for target {tgt}: {out_tar}")
+        print(f"[SUCCESS] Packaged model for {tgt}: {out_tar}")
+        packaged += 1
+
+    print(f"\nPacked {packaged} models successfully.")
 
 if __name__ == "__main__":
     main()

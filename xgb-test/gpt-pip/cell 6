@@ -112,7 +112,7 @@ for tgt in TARGET_COLS:
     train_steps[tgt] = step_train
 
 # -------------------------------
-# REPACK STEP
+# REPACK STEP (fixed)
 # -------------------------------
 mme_output = f"{PROJECT_NAME}/mme-packaged" if "PROJECT_NAME" in globals() else f"{PROJECT_PREFIX}/mme-packaged"
 
@@ -135,7 +135,7 @@ step_repack = ProcessingStep(
         ),
         ProcessingInput(
             input_name="preprocess_dir",
-            source=proc_uri,
+            source=proc_uri,                      # the preprocess output
             destination="/opt/ml/processing/preprocess"
         ),
         ProcessingInput(
