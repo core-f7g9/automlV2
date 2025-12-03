@@ -1,5 +1,5 @@
 # ============================
-# Cell 6 — LIBSVM-Aware Dynamic Pipeline (No job_arguments)
+# Cell 6 — LIBSVM-Aware Dynamic Pipeline (Fixed S3 Input Paths)
 # ============================
 
 import os
@@ -11,7 +11,6 @@ from sagemaker.xgboost.estimator import XGBoost
 from sagemaker.inputs import TrainingInput
 from sagemaker.workflow.pipeline_context import PipelineSession
 from sagemaker.workflow.pipeline import Pipeline
-from sagemaker.workflow.functions import Join
 
 pipeline_session = PipelineSession()
 
@@ -51,7 +50,7 @@ step_preprocess = ProcessingStep(
         "--targets", json.dumps(TARGET_COLS),
         "--input_features", json.dumps(INPUT_FEATURES),
         "--output_dir", "/opt/ml/processing/output",
-        "--tfidf_max_features", "2000",  # hashing dim
+        "--tfidf_max_features", "2000",
     ]
 )
 
@@ -65,7 +64,6 @@ preprocess_s3_uri = (
 # -------------------------------
 models_output = f"{PROJECT_NAME}/trained-models" if "PROJECT_NAME" in globals() else f"{PROJECT_PREFIX}/trained-models"
 train_steps = {}
-xgb_image = sagemaker.image_uris.retrieve("xgboost", region, version="1.5-1")
 
 for tgt in TARGET_COLS:
 
@@ -79,8 +77,11 @@ for tgt in TARGET_COLS:
         base_job_name=f"xgb-{tgt}"
     )
 
-    train_path = Join(on="/", values=[preprocess_s3_uri, tgt, "train.libsvm"])
-    val_path   = Join(on="/", values=[preprocess_s3_uri, tgt, "val.libsvm"])
+    # --------------------------
+    # ⭐ FIXED: Build TRUE S3 paths
+    # --------------------------
+    train_path = f"{preprocess_s3_uri}/{tgt}/train.libsvm"
+    val_path   = f"{preprocess_s3_uri}/{tgt}/val.libsvm"
 
     step_train = TrainingStep(
         name=f"Train_{tgt}",
@@ -96,7 +97,6 @@ for tgt in TARGET_COLS:
             )
         }
     )
-
 
     train_steps[tgt] = step_train
 
