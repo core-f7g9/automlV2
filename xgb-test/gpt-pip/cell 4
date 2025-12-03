@@ -5,19 +5,17 @@ import tarfile
 import shutil
 import glob
 
-def safe_copy(src, dst):
-    """Copy only if src exists and is not None."""
-    if src is None:
-        print(f"[WARN] Attempted to copy None → skipping")
-        return
-    if not os.path.exists(src):
-        print(f"[WARN] Missing file: {src} → skipping")
-        return
-    shutil.copy(src, dst)
+def safe_extract_tar(path, dest):
+    if not os.path.exists(path):
+        print(f"[WARN] Missing tar file: {path}")
+        return False
+    with tarfile.open(path, "r:gz") as tar:
+        tar.extractall(dest)
+    return True
 
-def pack(source_dir, output_tar):
-    with tarfile.open(output_tar, "w:gz") as tar:
-        tar.add(source_dir, arcname=".")
+def pack(dir_path, out_tar):
+    with tarfile.open(out_tar, "w:gz") as tar:
+        tar.add(dir_path, arcname=".")
 
 def main():
     parser = argparse.ArgumentParser()
@@ -28,40 +26,47 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # dynamic files
     preprocess_artifacts = glob.glob(os.path.join(args.preprocess_dir, "labelenc_*.pkl"))
     meta_file = os.path.join(args.preprocess_dir, "preprocess_meta.json")
-
-    if not os.path.exists(meta_file):
-        print(f"[ERROR] preprocess_meta.json missing at: {meta_file}")
-        raise FileNotFoundError("preprocess_meta.json not found")
 
     for tgt in os.listdir(args.models_dir):
         tgt_model_dir = os.path.join(args.models_dir, tgt)
         if not os.path.isdir(tgt_model_dir):
             continue
 
+        # model.tar.gz from training step
+        model_tar = os.path.join(tgt_model_dir, "model.tar.gz")
+        extract_dir = os.path.join(tgt_model_dir, "extracted")
+        os.makedirs(extract_dir, exist_ok=True)
+
+        safe_extract_tar(model_tar, extract_dir)
+
+        # Where the extracted artifacts live
+        xgb_model = os.path.join(extract_dir, "xgboost-model")
+        class_map = os.path.join(extract_dir, "class_map.json")
+
         packaging_dir = os.path.join(args.output_dir, tgt)
         os.makedirs(packaging_dir, exist_ok=True)
 
-        # model files
-        safe_copy(os.path.join(tgt_model_dir, "xgboost-model"), packaging_dir)
-        safe_copy(os.path.join(tgt_model_dir, "class_map.json"), packaging_dir)
+        # Copy model artifacts
+        shutil.copy(xgb_model, packaging_dir)
+        shutil.copy(class_map, packaging_dir)
 
-        # metadata
-        safe_copy(meta_file, packaging_dir)
+        # Metadata
+        if os.path.exists(meta_file):
+            shutil.copy(meta_file, packaging_dir)
 
-        # label encoders (optional)
+        # Optional encoders
         for art in preprocess_artifacts:
-            safe_copy(art, packaging_dir)
+            shutil.copy(art, packaging_dir)
 
-        # inference script (must exist in working directory)
-        safe_copy("inference.py", packaging_dir)
+        # inference script
+        shutil.copy("inference.py", packaging_dir)
 
-        # Create tar.gz
-        tar_path = os.path.join(args.output_dir, f"{tgt}.tar.gz")
-        pack(packaging_dir, tar_path)
-        print(f"Packaged model for {tgt}: {tar_path}")
+        # Create final .tar.gz for MME
+        out_tar = os.path.join(args.output_dir, f"{tgt}.tar.gz")
+        pack(packaging_dir, out_tar)
+        print(f"Packaged MME model for target {tgt}: {out_tar}")
 
 if __name__ == "__main__":
     main()
