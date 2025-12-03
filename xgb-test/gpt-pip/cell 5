@@ -1,104 +1,178 @@
 %%writefile inference.py
 import json
+import os
+import logging
+import traceback
+
 import numpy as np
 import xgboost as xgb
-import os
 import pickle
 from sklearn.feature_extraction.text import HashingVectorizer
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+
+def _log_dir_tree(root, label="MODEL_DIR"):
+    if not os.path.exists(root):
+        logger.info("[%s] %s DOES NOT EXIST", label, root)
+        return
+    for cur, dirs, files in os.walk(root):
+        rel = os.path.relpath(cur, root)
+        logger.info("[%s] %s dirs=%s files=%s", label, rel, dirs, files)
 
 
 def model_fn(model_dir):
     """
-    SageMaker provides model artifacts under model_dir.
-    With the corrected repack structure:
-        model_dir/model/xgboost-model
-        model_dir/code/class_map.json
-        model_dir/code/preprocess_meta.json
-        model_dir/code/labelenc_*.pkl
+    Called once per loaded model (per TargetModel).
+    We expect:
+      - xgboost-model
+      - class_map.json
+      - preprocess_meta.json
+      - labelenc_*.pkl
+    all directly under model_dir.
     """
+    logger.info("=== model_fn called with model_dir=%s ===", model_dir)
+    _log_dir_tree(model_dir, "MODEL_DIR_TREE")
 
-    # ---- Load XGBoost booster from /model/ ----
-    booster_path = os.path.join(model_dir, "model", "xgboost-model")
-    booster = xgb.Booster()
-    booster.load_model(booster_path)
+    try:
+        model_path = os.path.join(model_dir, "xgboost-model")
+        logger.info("model_fn: Loading Booster from %s", model_path)
 
-    # ---- Load class map from /code/ ----
-    class_map_path = os.path.join(model_dir, "code", "class_map.json")
-    with open(class_map_path) as f:
-        class_map = json.load(f)
+        booster = xgb.Booster()
+        booster.load_model(model_path)
+        logger.info("model_fn: Booster loaded OK")
 
-    # ---- Load preprocess metadata ----
-    meta_path = os.path.join(model_dir, "code", "preprocess_meta.json")
-    with open(meta_path) as f:
-        meta = json.load(f)
+        class_map_path = os.path.join(model_dir, "class_map.json")
+        logger.info("model_fn: Loading class_map from %s", class_map_path)
+        with open(class_map_path) as f:
+            class_map = json.load(f)
+        logger.info("model_fn: class_map size=%d", len(class_map))
 
-    feature_pipeline = meta["feature_pipeline"]
+        meta_path = os.path.join(model_dir, "preprocess_meta.json")
+        logger.info("model_fn: Loading preprocess metadata from %s", meta_path)
+        with open(meta_path) as f:
+            meta = json.load(f)
+        feature_pipeline = meta["feature_pipeline"]
+        logger.info("model_fn: feature_pipeline steps=%d", len(feature_pipeline))
 
-    # ---- Load label encoders dynamically from /code/ ----
-    encoders = {}
-    for step in feature_pipeline:
-        if step["type"] == "labelenc":
-            enc_path = os.path.join(model_dir, "code", step["file"])
-            with open(enc_path, "rb") as f:
-                enc = pickle.load(f)
-            encoders[step["name"]] = enc
+        # Load label encoders
+        encoders = {}
+        for step in feature_pipeline:
+            if step["type"] == "labelenc":
+                enc_path = os.path.join(model_dir, step["file"])
+                logger.info(
+                    "model_fn: Loading LabelEncoder for %s from %s",
+                    step["name"],
+                    enc_path,
+                )
+                with open(enc_path, "rb") as f:
+                    encoders[step["name"]] = pickle.load(f)
 
-    return {
-        "model": booster,
-        "class_map": class_map,
-        "pipeline": feature_pipeline,
-        "encoders": encoders
-    }
+        logger.info("model_fn: Loaded %d label encoders", len(encoders))
+
+        return {
+            "model": booster,
+            "class_map": class_map,
+            "pipeline": feature_pipeline,
+            "encoders": encoders,
+        }
+
+    except Exception as e:
+        logger.error("ERROR in model_fn: %s", e, exc_info=True)
+        # Re-raise so MME returns 5xx and you see this in CloudWatch
+        raise
 
 
 def input_fn(request_body, request_content_type):
-    return json.loads(request_body)
+    """
+    We assume JSON input: a single record of the form
+      {
+        "VendorName": "...",
+        "LineDescription": "...",
+        "ClubNumber": "...",
+        ...
+      }
+    """
+    logger.info("input_fn: content_type=%s", request_content_type)
+    # Log only first 1k chars of body to avoid huge logs
+    logger.info("input_fn: raw body (truncated)=%s", request_body[:1000])
+
+    try:
+        data = json.loads(request_body)
+        logger.info("input_fn: parsed keys=%s", list(data.keys()))
+        return data
+    except Exception as e:
+        logger.error("ERROR in input_fn: %s", e, exc_info=True)
+        raise
 
 
 def predict_fn(data, model_artifacts):
+    logger.info("predict_fn: starting; incoming keys=%s", list(data.keys()))
 
     pipeline = model_artifacts["pipeline"]
     encoders = model_artifacts["encoders"]
     booster = model_artifacts["model"]
+    class_map = model_artifacts["class_map"]
 
-    feature_values = []
+    try:
+        feature_values = []
 
-    for step in pipeline:
-        name = step["name"]
-        ftype = step["type"]
-        raw_val = data[name]
+        for step in pipeline:
+            name = step["name"]
+            ftype = step["type"]
+            raw_val = data.get(name, None)
 
-        # TEXT FEATURE → HashingVectorizer
-        if ftype == "hash":
-            vec = HashingVectorizer(
-                n_features=step["hash_dim"],
-                alternate_sign=False,
-                norm=None
-            )
-            X = vec.transform([str(raw_val)]).toarray()[0]
-            feature_values.append(X)
-            continue
+            logger.info("predict_fn: feature=%s type=%s raw_val=%s", name, ftype, raw_val)
 
-        # CATEGORICAL FEATURE → LabelEncoder
-        if ftype == "labelenc":
-            enc = encoders[name]
-            val = enc.transform([str(raw_val)])[0]
-            feature_values.append(np.array([val]))
-            continue
+            if ftype == "hash":
+                vec = HashingVectorizer(
+                    n_features=step["hash_dim"],
+                    alternate_sign=False,
+                    norm=None,
+                )
+                X = vec.transform([str(raw_val)]).toarray()[0]
+                feature_values.append(X)
+                continue
 
-        # NUMERIC FEATURE
-        num_val = float(raw_val)
-        feature_values.append(np.array([num_val]))
+            if ftype == "labelenc":
+                enc = encoders[name]
+                val = enc.transform([str(raw_val)])[0]
+                feature_values.append(np.array([val]))
+                continue
 
-    X_full = np.hstack(feature_values)
-    dmat = xgb.DMatrix(X_full.reshape(1, -1))
+            # numeric
+            try:
+                num_val = float(raw_val) if raw_val is not None else 0.0
+            except ValueError:
+                logger.warning(
+                    "predict_fn: could not cast %s=%s to float; using 0.0", name, raw_val
+                )
+                num_val = 0.0
+            feature_values.append(np.array([num_val]))
 
-    probs = booster.predict(dmat)[0]
-    idx_to_class = {v: k for k, v in model_artifacts["class_map"].items()}
-    pred = idx_to_class[int(np.argmax(probs))]
+        X_full = np.hstack(feature_values)
+        logger.info("predict_fn: final feature vector shape=%s", X_full.shape)
 
-    return {"prediction": pred, "probabilities": probs.tolist()}
+        dmat = xgb.DMatrix(X_full.reshape(1, -1))
+        probs = booster.predict(dmat)[0]
+        logger.info(
+            "predict_fn: probs len=%d; first few=%s", len(probs), probs[: min(5, len(probs))]
+        )
+
+        idx_to_class = {v: k for k, v in class_map.items()}
+        pred_idx = int(np.argmax(probs))
+        pred = idx_to_class.get(pred_idx, f"<unknown-{pred_idx}>")
+
+        logger.info("predict_fn: pred_idx=%d, class=%s", pred_idx, pred)
+
+        return {"prediction": pred, "probabilities": probs.tolist()}
+
+    except Exception as e:
+        logger.error("ERROR in predict_fn: %s", e, exc_info=True)
+        raise
 
 
 def output_fn(prediction, accept):
+    logger.info("output_fn: accept=%s, prediction=%s", accept, prediction)
     return json.dumps(prediction)
