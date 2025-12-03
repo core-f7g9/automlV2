@@ -34,38 +34,34 @@ def main():
         if not os.path.isdir(tgt_model_dir):
             continue
 
-        # model.tar.gz from training step
-        model_tar = os.path.join(tgt_model_dir, "model.tar.gz")
+        # CORRECT path to SageMaker training model tar
+        model_tar = os.path.join(tgt_model_dir, "output", "model.tar.gz")
+
         extract_dir = os.path.join(tgt_model_dir, "extracted")
         os.makedirs(extract_dir, exist_ok=True)
 
         safe_extract_tar(model_tar, extract_dir)
 
-        # Where the extracted artifacts live
         xgb_model = os.path.join(extract_dir, "xgboost-model")
         class_map = os.path.join(extract_dir, "class_map.json")
 
         packaging_dir = os.path.join(args.output_dir, tgt)
         os.makedirs(packaging_dir, exist_ok=True)
 
-        # Copy model artifacts
         shutil.copy(xgb_model, packaging_dir)
         shutil.copy(class_map, packaging_dir)
 
-        # Metadata
         if os.path.exists(meta_file):
             shutil.copy(meta_file, packaging_dir)
 
-        # Optional encoders
         for art in preprocess_artifacts:
             shutil.copy(art, packaging_dir)
 
-        # inference script
         shutil.copy("inference.py", packaging_dir)
 
-        # Create final .tar.gz for MME
         out_tar = os.path.join(args.output_dir, f"{tgt}.tar.gz")
         pack(packaging_dir, out_tar)
+
         print(f"Packaged MME model for target {tgt}: {out_tar}")
 
 if __name__ == "__main__":
