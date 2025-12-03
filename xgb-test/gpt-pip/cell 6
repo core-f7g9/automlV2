@@ -1,6 +1,6 @@
 # ============================
-# Cell 6 — FINAL FIXED VERSION
-# (LIBSVM + XGBoost + Dynamic Preprocess Paths)
+# Cell 6 — FINAL WORKING VERSION
+# (LIBSVM + XGBoost + Dynamic Preprocess Paths + Valid Join)
 # ============================
 
 import os
@@ -56,18 +56,13 @@ step_preprocess = ProcessingStep(
     ]
 )
 
-# -------------------------------
-# CLEANED PREPROCESS URI
-# -------------------------------
-# IMPORTANT: remove trailing slash so Join() doesn't generate invalid S3 paths
-raw_proc_uri = step_preprocess.properties.ProcessingOutputConfig.Outputs["proc_output"].S3Output.S3Uri
-proc_uri_clean = raw_proc_uri.rstrip("/")   # <-- Fixes ALL mounting issues
+# This is the Pipeline Property for the preprocess output S3 URI
+proc_uri = step_preprocess.properties.ProcessingOutputConfig.Outputs["proc_output"].S3Output.S3Uri
 
 # -------------------------------
-# TRAINING STEPS (LIBSVM)
+# TRAINING STEPS (LIBSVM + XGBoost)
 # -------------------------------
 models_output = f"{PROJECT_NAME}/trained-models" if "PROJECT_NAME" in globals() else f"{PROJECT_PREFIX}/trained-models"
-
 train_steps = {}
 
 for tgt in TARGET_COLS:
@@ -82,21 +77,23 @@ for tgt in TARGET_COLS:
         base_job_name=f"xgb-{tgt}"
     )
 
-    # -----------------------------------
-    # ⭐ FIXED: Valid S3 paths via Join()
-    # -----------------------------------
+    # --------------------------
+    # ⭐ FIXED: Valid S3 paths using Join()
+    # No Python string ops, no rstrip(), fully Pipeline-safe
+    # --------------------------
     train_path = Join(
         on="/",
-        values=[proc_uri_clean, tgt, "train.libsvm"]
-    )
-    val_path = Join(
-        on="/",
-        values=[proc_uri_clean, tgt, "val.libsvm"]
+        values=[proc_uri, tgt, "train.libsvm"]
     )
 
-    # -----------------------------------
-    # TRAINING — MUST USE "train" & "validation" CHANNELS
-    # -----------------------------------
+    val_path = Join(
+        on="/",
+        values=[proc_uri, tgt, "val.libsvm"]
+    )
+
+    # --------------------------
+    # TRAIN — MUST use "train" and "validation" channels
+    # --------------------------
     step_train = TrainingStep(
         name=f"Train_{tgt}",
         estimator=estimator,
@@ -138,7 +135,7 @@ step_repack = ProcessingStep(
         ),
         ProcessingInput(
             input_name="preprocess_dir",
-            source=proc_uri_clean,
+            source=proc_uri,
             destination="/opt/ml/processing/preprocess"
         ),
         ProcessingInput(
