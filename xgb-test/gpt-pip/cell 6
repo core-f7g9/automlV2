@@ -134,6 +134,11 @@ step_repack = ProcessingStep(
         )
     ],
     code="repack_for_mme.py",
+    job_arguments=[
+        "--models_dir", "/opt/ml/processing/models",
+        "--preprocess_dir", "/opt/ml/processing/preprocess",
+        "--output_dir", "/opt/ml/processing/output"
+    ],
     depends_on=list(train_steps.values())
 )
 

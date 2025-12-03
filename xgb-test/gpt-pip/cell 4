@@ -5,6 +5,16 @@ import tarfile
 import shutil
 import glob
 
+def safe_copy(src, dst):
+    """Copy only if src exists and is not None."""
+    if src is None:
+        print(f"[WARN] Attempted to copy None → skipping")
+        return
+    if not os.path.exists(src):
+        print(f"[WARN] Missing file: {src} → skipping")
+        return
+    shutil.copy(src, dst)
+
 def pack(source_dir, output_tar):
     with tarfile.open(output_tar, "w:gz") as tar:
         tar.add(source_dir, arcname=".")
@@ -18,9 +28,13 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Collect label encoders & metadata dynamically
+    # dynamic files
     preprocess_artifacts = glob.glob(os.path.join(args.preprocess_dir, "labelenc_*.pkl"))
     meta_file = os.path.join(args.preprocess_dir, "preprocess_meta.json")
+
+    if not os.path.exists(meta_file):
+        print(f"[ERROR] preprocess_meta.json missing at: {meta_file}")
+        raise FileNotFoundError("preprocess_meta.json not found")
 
     for tgt in os.listdir(args.models_dir):
         tgt_model_dir = os.path.join(args.models_dir, tgt)
@@ -30,25 +44,24 @@ def main():
         packaging_dir = os.path.join(args.output_dir, tgt)
         os.makedirs(packaging_dir, exist_ok=True)
 
-        # Copy model files
-        shutil.copy(os.path.join(tgt_model_dir, "xgboost-model"), packaging_dir)
-        shutil.copy(os.path.join(tgt_model_dir, "class_map.json"), packaging_dir)
+        # model files
+        safe_copy(os.path.join(tgt_model_dir, "xgboost-model"), packaging_dir)
+        safe_copy(os.path.join(tgt_model_dir, "class_map.json"), packaging_dir)
 
-        # Copy preprocessing metadata + encoders
-        if os.path.exists(meta_file):
-            shutil.copy(meta_file, packaging_dir)
+        # metadata
+        safe_copy(meta_file, packaging_dir)
 
+        # label encoders (optional)
         for art in preprocess_artifacts:
-            shutil.copy(art, packaging_dir)
+            safe_copy(art, packaging_dir)
 
-        # Copy inference script
-        shutil.copy("inference.py", packaging_dir)
+        # inference script (must exist in working directory)
+        safe_copy("inference.py", packaging_dir)
 
-        # Create tar.gz for MME
-        pack(
-            packaging_dir,
-            os.path.join(args.output_dir, f"{tgt}.tar.gz")
-        )
+        # Create tar.gz
+        tar_path = os.path.join(args.output_dir, f"{tgt}.tar.gz")
+        pack(packaging_dir, tar_path)
+        print(f"Packaged model for {tgt}: {tar_path}")
 
 if __name__ == "__main__":
     main()
