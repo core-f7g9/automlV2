@@ -8,27 +8,37 @@ from sklearn.feature_extraction.text import HashingVectorizer
 
 
 def model_fn(model_dir):
+    """
+    SageMaker provides model artifacts under model_dir.
+    With the corrected repack structure:
+        model_dir/model/xgboost-model
+        model_dir/code/class_map.json
+        model_dir/code/preprocess_meta.json
+        model_dir/code/labelenc_*.pkl
+    """
 
-    # Load trained booster
+    # ---- Load XGBoost booster from /model/ ----
+    booster_path = os.path.join(model_dir, "model", "xgboost-model")
     booster = xgb.Booster()
-    booster.load_model(os.path.join(model_dir, "xgboost-model"))
+    booster.load_model(booster_path)
 
-    # Load class map
-    with open(os.path.join(model_dir, "class_map.json")) as f:
+    # ---- Load class map from /code/ ----
+    class_map_path = os.path.join(model_dir, "code", "class_map.json")
+    with open(class_map_path) as f:
         class_map = json.load(f)
 
-    # Load preprocess metadata
-    meta_path = os.path.join(model_dir, "preprocess_meta.json")
+    # ---- Load preprocess metadata ----
+    meta_path = os.path.join(model_dir, "code", "preprocess_meta.json")
     with open(meta_path) as f:
         meta = json.load(f)
 
     feature_pipeline = meta["feature_pipeline"]
 
-    # Load label encoders dynamically
+    # ---- Load label encoders dynamically from /code/ ----
     encoders = {}
     for step in feature_pipeline:
         if step["type"] == "labelenc":
-            enc_path = os.path.join(model_dir, step["file"])
+            enc_path = os.path.join(model_dir, "code", step["file"])
             with open(enc_path, "rb") as f:
                 enc = pickle.load(f)
             encoders[step["name"]] = enc
@@ -56,12 +66,9 @@ def predict_fn(data, model_artifacts):
     for step in pipeline:
         name = step["name"]
         ftype = step["type"]
-
         raw_val = data[name]
 
-        # ---------------------------------------------------------
         # TEXT FEATURE → HashingVectorizer
-        # ---------------------------------------------------------
         if ftype == "hash":
             vec = HashingVectorizer(
                 n_features=step["hash_dim"],
@@ -72,22 +79,17 @@ def predict_fn(data, model_artifacts):
             feature_values.append(X)
             continue
 
-        # ---------------------------------------------------------
         # CATEGORICAL FEATURE → LabelEncoder
-        # ---------------------------------------------------------
         if ftype == "labelenc":
             enc = encoders[name]
             val = enc.transform([str(raw_val)])[0]
             feature_values.append(np.array([val]))
             continue
 
-        # ---------------------------------------------------------
         # NUMERIC FEATURE
-        # ---------------------------------------------------------
         num_val = float(raw_val)
         feature_values.append(np.array([num_val]))
 
-    # Combine features into final vector
     X_full = np.hstack(feature_values)
     dmat = xgb.DMatrix(X_full.reshape(1, -1))
 
