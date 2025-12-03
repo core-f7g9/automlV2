@@ -5,6 +5,7 @@ import tarfile
 import shutil
 import glob
 
+
 def safe_extract_tar(path, dest):
     if not os.path.exists(path):
         print(f"[WARN] Missing tar file: {path}")
@@ -17,26 +18,21 @@ def safe_extract_tar(path, dest):
         print(f"[ERROR] Failed to extract {path}: {e}")
         return False
 
+
 def find_model_tar(tgt_dir):
     """
-    Fully exhaustive search for model.tar.gz across all SageMaker directory patterns.
+    Find model.tar.gz inside SageMaker's output structure.
     """
-    candidates = []
+    candidates = glob.glob(os.path.join(tgt_dir, "**", "model.tar.gz"), recursive=True)
+    if candidates:
+        return candidates[0]
 
-    # The two most common locations
-    candidates.append(os.path.join(tgt_dir, "model.tar.gz"))
-    candidates.append(os.path.join(tgt_dir, "output", "model.tar.gz"))
-
-    # Deep recursive search
-    candidates.extend(
-        glob.glob(os.path.join(tgt_dir, "**", "model.tar.gz"), recursive=True)
-    )
-
-    for c in candidates:
-        if os.path.exists(c):
-            return c
+    fallback = os.path.join(tgt_dir, "model.tar.gz")
+    if os.path.exists(fallback):
+        return fallback
 
     return None
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -65,12 +61,11 @@ def main():
         model_tar = find_model_tar(tgt_dir)
         if not model_tar:
             print(f"[ERROR] model.tar.gz not found under {tgt_dir}")
-            print("Directory contents:", os.listdir(tgt_dir))
             continue
 
         print(f"[INFO] Found model archive: {model_tar}")
 
-        extract_dir = os.path.join(tgt_dir, "extract")
+        extract_dir = os.path.join(tgt_dir, "extracted")
         os.makedirs(extract_dir, exist_ok=True)
 
         if not safe_extract_tar(model_tar, extract_dir):
@@ -91,23 +86,40 @@ def main():
 
         # Build package directory
         pkg_dir = os.path.join(args.output_dir, tgt)
-        os.makedirs(pkg_dir, exist_ok=True)
+        if os.path.exists(pkg_dir):
+            shutil.rmtree(pkg_dir)
+        os.makedirs(pkg_dir)
 
-        shutil.copy(xgb_model, pkg_dir)
-        shutil.copy(class_map, pkg_dir)
+        # ===============================
+        # PACKAGE STRUCTURE FIXED HERE
+        # ===============================
 
-        if os.path.exists(meta_file):
-            shutil.copy(meta_file, pkg_dir)
+        # ---- Model folder: ONLY the booster goes here ----
+        model_dir = os.path.join(pkg_dir, "model")
+        os.makedirs(model_dir, exist_ok=True)
+        shutil.copy(xgb_model, os.path.join(model_dir, "xgboost-model"))
 
-        for enc in preprocess_artifacts:
-            shutil.copy(enc, pkg_dir)
-
-        # Copy inference.py in code/
+        # ---- Code folder: all supporting artifacts ----
         code_dir = os.path.join(pkg_dir, "code")
         os.makedirs(code_dir, exist_ok=True)
+
+        # inference script
         shutil.copy(inference_script, os.path.join(code_dir, "inference.py"))
 
-        # Final tarball
+        # class map
+        shutil.copy(class_map, os.path.join(code_dir, "class_map.json"))
+
+        # preprocess metadata
+        if os.path.exists(meta_file):
+            shutil.copy(meta_file, os.path.join(code_dir, "preprocess_meta.json"))
+
+        # encoders
+        for enc in preprocess_artifacts:
+            shutil.copy(enc, code_dir)
+
+        # ===============================
+        # FINAL TARBALL
+        # ===============================
         out_tar = os.path.join(args.output_dir, f"{tgt}.tar.gz")
         with tarfile.open(out_tar, "w:gz") as tar:
             tar.add(pkg_dir, arcname=".")
@@ -116,6 +128,7 @@ def main():
         packaged += 1
 
     print(f"\nPacked {packaged} models successfully.")
+
 
 if __name__ == "__main__":
     main()
