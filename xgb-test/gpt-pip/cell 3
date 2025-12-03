@@ -5,33 +5,24 @@ import os
 import numpy as np
 
 def main():
-    train_path = "/opt/ml/input/data/train/train.libsvm"
-    val_path   = "/opt/ml/input/data/val/val.libsvm"
+    train_path = "/opt/ml/input/data/train/train"
+    val_path   = "/opt/ml/input/data/val/val"
     model_dir  = "/opt/ml/model"
     os.makedirs(model_dir, exist_ok=True)
 
-    # -----------------------------
-    # Load sparse LIBSVM
-    # -----------------------------
+    # Load LIBSVM files
     dtrain = xgb.DMatrix(train_path)
     dval   = xgb.DMatrix(val_path)
 
     y_train = dtrain.get_label()
     y_val   = dval.get_label()
 
-    # -----------------------------
-    # Build class map from union of labels across train + val
-    # -----------------------------
     all_classes = sorted(set(list(y_train) + list(y_val)))
     class_map = {str(cls): i for i, cls in enumerate(all_classes)}
 
-    # Save class map
     with open(os.path.join(model_dir, "class_map.json"), "w") as f:
         json.dump(class_map, f, indent=2)
 
-    # -----------------------------
-    # Encode labels using class_map
-    # -----------------------------
     def encode_labels(dmat):
         raw = dmat.get_label()
         mapped = np.array([class_map[str(lbl)] for lbl in raw])
@@ -40,34 +31,24 @@ def main():
     encode_labels(dtrain)
     encode_labels(dval)
 
-    num_class = len(class_map)
-
-    # -----------------------------
-    # Train multi-class XGBoost
-    # -----------------------------
     params = {
         "objective": "multi:softprob",
-        "num_class": num_class,
+        "num_class": len(class_map),
         "eval_metric": "mlogloss",
         "tree_method": "hist",
         "max_depth": 8,
         "eta": 0.2,
     }
 
-    watchlist = [(dtrain, "train"), (dval, "validation")]
-
     booster = xgb.train(
         params=params,
         dtrain=dtrain,
         num_boost_round=200,
-        evals=watchlist,
+        evals=[(dtrain, "train"), (dval, "validation")]
     )
 
-    # -----------------------------
-    # Save model
-    # -----------------------------
     booster.save_model(os.path.join(model_dir, "xgboost-model"))
-    print("✅ Training complete — union-of-classes mapping used.")
+    print("Saved model into", model_dir)
 
 if __name__ == "__main__":
     main()
