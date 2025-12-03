@@ -1,5 +1,6 @@
 # ============================
-# Cell 6 — LIBSVM-Aware Dynamic Pipeline (Fixed S3 Input Paths)
+# Cell 6 — FINAL FIXED VERSION
+# (LIBSVM + XGBoost + Dynamic Preprocess Paths)
 # ============================
 
 import os
@@ -11,6 +12,7 @@ from sagemaker.xgboost.estimator import XGBoost
 from sagemaker.inputs import TrainingInput
 from sagemaker.workflow.pipeline_context import PipelineSession
 from sagemaker.workflow.pipeline import Pipeline
+from sagemaker.workflow.functions import Join
 
 pipeline_session = PipelineSession()
 
@@ -54,15 +56,18 @@ step_preprocess = ProcessingStep(
     ]
 )
 
-preprocess_s3_uri = (
-    step_preprocess.properties.ProcessingOutputConfig.Outputs["proc_output"]
-    .S3Output.S3Uri
-)
+# -------------------------------
+# CLEANED PREPROCESS URI
+# -------------------------------
+# IMPORTANT: remove trailing slash so Join() doesn't generate invalid S3 paths
+raw_proc_uri = step_preprocess.properties.ProcessingOutputConfig.Outputs["proc_output"].S3Output.S3Uri
+proc_uri_clean = raw_proc_uri.rstrip("/")   # <-- Fixes ALL mounting issues
 
 # -------------------------------
 # TRAINING STEPS (LIBSVM)
 # -------------------------------
 models_output = f"{PROJECT_NAME}/trained-models" if "PROJECT_NAME" in globals() else f"{PROJECT_PREFIX}/trained-models"
+
 train_steps = {}
 
 for tgt in TARGET_COLS:
@@ -77,12 +82,21 @@ for tgt in TARGET_COLS:
         base_job_name=f"xgb-{tgt}"
     )
 
-    # --------------------------
-    # ⭐ FIXED: Build TRUE S3 paths
-    # --------------------------
-    train_path = f"{preprocess_s3_uri}/{tgt}/train.libsvm"
-    val_path   = f"{preprocess_s3_uri}/{tgt}/val.libsvm"
+    # -----------------------------------
+    # ⭐ FIXED: Valid S3 paths via Join()
+    # -----------------------------------
+    train_path = Join(
+        on="/",
+        values=[proc_uri_clean, tgt, "train.libsvm"]
+    )
+    val_path = Join(
+        on="/",
+        values=[proc_uri_clean, tgt, "val.libsvm"]
+    )
 
+    # -----------------------------------
+    # TRAINING — MUST USE "train" & "validation" CHANNELS
+    # -----------------------------------
     step_train = TrainingStep(
         name=f"Train_{tgt}",
         estimator=estimator,
@@ -124,7 +138,7 @@ step_repack = ProcessingStep(
         ),
         ProcessingInput(
             input_name="preprocess_dir",
-            source=preprocess_s3_uri,
+            source=proc_uri_clean,
             destination="/opt/ml/processing/preprocess"
         ),
         ProcessingInput(
@@ -159,4 +173,4 @@ pipeline = Pipeline(
 )
 
 pipeline.upsert(role_arn=role)
-print("🎉 LIBSVM Pipeline Created Successfully!")
+print("🎉 FINAL PIPELINE CREATED SUCCESSFULLY!")
