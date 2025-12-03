@@ -1,3 +1,37 @@
+import boto3
+
+sm = boto3.client("sagemaker")
+
+# These must match your names
+ENDPOINT_NAME = "multi-target-xgb-mme-endpoint"
+MODEL_NAME = "multi-target-xgb-mme-model"
+ENDPOINT_CONFIG_NAME = ENDPOINT_NAME  # usually same as endpoint name
+
+def safe_delete_endpoint(name):
+    try:
+        sm.delete_endpoint(EndpointName=name)
+        print(f"Deleted endpoint: {name}")
+    except sm.exceptions.ValidationException:
+        print(f"Endpoint not found: {name}")
+
+def safe_delete_endpoint_config(name):
+    try:
+        sm.delete_endpoint_config(EndpointConfigName=name)
+        print(f"Deleted endpoint config: {name}")
+    except sm.exceptions.ValidationException:
+        print(f"Endpoint config not found: {name}")
+
+def safe_delete_model(name):
+    try:
+        sm.delete_model(ModelName=name)
+        print(f"Deleted model: {name}")
+    except sm.exceptions.ValidationException:
+        print(f"Model not found: {name}")
+
+safe_delete_endpoint(ENDPOINT_NAME)
+safe_delete_endpoint_config(ENDPOINT_CONFIG_NAME)
+safe_delete_model(MODEL_NAME)
+
 # ============================
 # CELL A1 — Imports & Config
 # ============================
@@ -16,7 +50,7 @@ BUCKET = sm_sess.default_bucket()
 
 # MME packaged models location (from repack_for_mme output)
 MME_PREFIX = f"{PROJECT_PREFIX}/mme-packaged"
-MME_S3 = f"s3://{BUCKET}/{MME_PREFIX}"
+MME_S3 = f"s3://{BUCKET}/{MME_PREFIX}/"
 
 ENDPOINT_NAME = "multi-target-xgb-mme-endpoint"
 MODEL_NAME = "multi-target-xgb-mme-model"
