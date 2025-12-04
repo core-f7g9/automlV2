@@ -1,9 +1,14 @@
 from sagemaker.predictor import Predictor
+from sagemaker.serializers import JSONSerializer
+from sagemaker.deserializers import JSONDeserializer
 
 predictor = Predictor(
     endpoint_name=ENDPOINT_NAME,
-    sagemaker_session=sm_sess
+    sagemaker_session=sm_sess,
+    serializer=JSONSerializer(),
+    deserializer=JSONDeserializer()
 )
+
 
 print("Reattached Predictor:", predictor.endpoint_name)
 
@@ -23,7 +28,6 @@ target_model = "DepartmentCode.tar.gz"
 response = predictor.predict(
     json.dumps(sample_payload),
     target_model=target_model,
-    content_type="application/json"
 )
 
 print("Raw response:", response)
@@ -43,6 +47,5 @@ for m in targets:
     resp = predictor.predict(
         json.dumps(sample_payload),
         target_model=m
-        content_type="application/json"
     )
     print(resp)
