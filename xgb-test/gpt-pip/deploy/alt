@@ -1,5 +1,5 @@
 # ============================
-# CORRECTED MME Deployment - Fixed Environment Variables
+# CORRECTED MME Deployment - Changed to SKLEARN Container
 # ============================
 import boto3
 import sagemaker
@@ -19,17 +19,15 @@ ENDPOINT_CONFIG_NAME = ENDPOINT_NAME
 
 region = boto3.Session().region_name
 
+# ⭐ CRITICAL CHANGE: Using the stable SKLEARN container as the base
 container_uri = sagemaker.image_uris.retrieve(
-    framework="xgboost",
+    framework="sklearn",
     region=region,
-    version="1.5-1"
+    version="1.2-1"  # Use a stable version that has scikit-learn
 )
 
 # ============================
-# Step 1: Create Model - ONLY SAGEMAKER_PROGRAM
-# ============================
-# ============================
-# Step 1: Create Model - CORRECTED
+# Step 1: Create Model
 # ============================
 try:
     # Delete existing model if you need to update config
@@ -45,8 +43,7 @@ try:
             'Image': container_uri,
             'ModelDataUrl': MME_S3,
             'Mode': 'MultiModel'
-            # REMOVED 'Environment' block completely.
-            # The container will auto-discover code/inference.py inside the .tar.gz
+            # Environment block remains removed (correct)
         },
         ExecutionRoleArn=role
     )

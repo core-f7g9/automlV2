@@ -106,15 +106,6 @@ def main():
         # ---------------------------------------------------------
         # BUILD PACKAGE: Standard MME Structure
         # ---------------------------------------------------------
-        # /
-        # ├── xgboost-model        <-- ROOT (Crucial for MME)
-        # └── code/
-        #     ├── inference.py
-        #     ├── requirements.txt <-- Crucial for sklearn
-        #     ├── class_map.json
-        #     ├── preprocess_meta.json
-        #     └── labelenc_*.pkl
-        # ---------------------------------------------------------
         
         pkg_root = os.path.join(args.output_dir, f"{tgt}_pkg")
         if os.path.exists(pkg_root):
@@ -145,12 +136,12 @@ def main():
         logger.info("  Copying inference.py to code/...")
         shutil.copy(inference_script_src, os.path.join(code_dir, "inference.py"))
 
-        # 6. Create requirements.txt in CODE directory
+        # 6. Create requirements.txt in CODE directory ⭐ UPDATED REQUIREMENTS
         logger.info("  Creating requirements.txt in code/...")
         with open(os.path.join(code_dir, "requirements.txt"), "w") as req:
-            req.write("scikit-learn\n")
-            req.write("joblib\n")
-            req.write("scipy\n")
+            req.write("xgboost\n")  # We need to install XGBoost
+            req.write("joblib\n")   # Safe to include, or rely on base image
+            req.write("scipy\n")    # Safe to include, or rely on base image
 
         # 7. Verify package structure before taring
         logger.info("  Package structure:")
