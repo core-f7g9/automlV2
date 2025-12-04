@@ -1,5 +1,5 @@
 # ============================
-# Alternative Approach Using Boto3 Directly
+# CORRECTED MME Deployment - Fixed Environment Variables
 # ============================
 import boto3
 import sagemaker
@@ -26,26 +26,40 @@ container_uri = sagemaker.image_uris.retrieve(
 )
 
 # ============================
-# Step 1: Create Model with Environment Variables
+# Step 1: Create Model - ONLY SAGEMAKER_PROGRAM
 # ============================
 try:
     sm_client.create_model(
         ModelName=MODEL_NAME,
         PrimaryContainer={
             'Image': container_uri,
-            'ModelDataUrl': MME_S3,  # This is the prefix for MME
+            'ModelDataUrl': MME_S3,
             'Mode': 'MultiModel',
             'Environment': {
-                'SAGEMAKER_PROGRAM': 'inference.py',
-                'SAGEMAKER_SUBMIT_DIRECTORY': '/opt/ml/model/code',
-                'SAGEMAKER_REGION': region
+                # ⭐ CRITICAL: Only set SAGEMAKER_PROGRAM
+                # Do NOT set SAGEMAKER_SUBMIT_DIRECTORY for MME
+                'SAGEMAKER_PROGRAM': 'inference.py'
             }
         },
         ExecutionRoleArn=role
     )
     print(f"✅ Created model: {MODEL_NAME}")
 except sm_client.exceptions.ResourceInUse:
-    print(f"⚠️ Model {MODEL_NAME} already exists")
+    print(f"⚠️ Model {MODEL_NAME} already exists - deleting and recreating...")
+    sm_client.delete_model(ModelName=MODEL_NAME)
+    sm_client.create_model(
+        ModelName=MODEL_NAME,
+        PrimaryContainer={
+            'Image': container_uri,
+            'ModelDataUrl': MME_S3,
+            'Mode': 'MultiModel',
+            'Environment': {
+                'SAGEMAKER_PROGRAM': 'inference.py'
+            }
+        },
+        ExecutionRoleArn=role
+    )
+    print(f"✅ Recreated model: {MODEL_NAME}")
 
 # ============================
 # Step 2: Create Endpoint Configuration
@@ -74,7 +88,7 @@ try:
         EndpointConfigName=ENDPOINT_CONFIG_NAME
     )
     print(f"✅ Creating endpoint: {ENDPOINT_NAME}")
-    print("⏳ Waiting for endpoint to be in service...")
+    print("⏳ Waiting for endpoint to be in service (this may take 5-10 minutes)...")
     
     waiter = sm_client.get_waiter('endpoint_in_service')
     waiter.wait(EndpointName=ENDPOINT_NAME)
@@ -108,8 +122,13 @@ print("Testing Endpoint")
 print("="*50)
 
 target_model = "DepartmentCode.tar.gz"
-response = predictor.predict(sample_payload, target_model=target_model)
-print(f"\n✅ Success! Response:\n{response}")
+
+try:
+    response = predictor.predict(sample_payload, target_model=target_model)
+    print(f"\n✅ Success! Response:\n{response}")
+except Exception as e:
+    print(f"\n❌ Error: {e}")
+    print("\nTroubleshooting: Check CloudWatch logs for the endpoint")
 
 # Test all models
 targets = [
@@ -127,6 +146,9 @@ for m in targets:
     print(f"\n📊 {m}:")
     try:
         resp = predictor.predict(sample_payload, target_model=m)
-        print(f"  Prediction: {resp.get('prediction')}")
+        pred = resp.get('prediction', 'N/A')
+        probs = resp.get('probabilities', [])
+        top_prob = max(probs) if probs else 0
+        print(f"  ✅ Prediction: {pred} (confidence: {top_prob:.2%})")
     except Exception as e:
-        print(f"  ❌ Error: {e}")
+        print(f"  ❌ Error: {str(e)[:100]}")

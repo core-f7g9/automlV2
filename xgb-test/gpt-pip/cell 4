@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def find_model_tar(tgt_dir):
-    # Search for model.tar.gz in the target directory or subdirectories
+    """Search for model.tar.gz in the target directory or subdirectories"""
     candidates = [
         os.path.join(tgt_dir, "model.tar.gz"),
         os.path.join(tgt_dir, "output", "model.tar.gz")
@@ -22,6 +22,7 @@ def find_model_tar(tgt_dir):
     return None
 
 def safe_extract(path, dest):
+    """Extract tar.gz file with error handling"""
     try:
         with tarfile.open(path, "r:gz") as tar:
             tar.extractall(dest)
@@ -42,7 +43,27 @@ def main():
     # Locate artifacts from the preprocessing step
     preprocess_artifacts = glob.glob(os.path.join(args.preprocess_dir, "labelenc_*.pkl"))
     meta_file = os.path.join(args.preprocess_dir, "preprocess_meta.json")
+    
+    # UPDATED: The inference script location
     inference_script_src = "/opt/ml/processing/code/inference.py"
+    
+    # Validate that inference script exists
+    if not os.path.exists(inference_script_src):
+        logger.error("inference.py not found at %s", inference_script_src)
+        logger.error("Available files in /opt/ml/processing/code/:")
+        if os.path.exists("/opt/ml/processing/code"):
+            for f in os.listdir("/opt/ml/processing/code"):
+                logger.error("  - %s", f)
+        raise FileNotFoundError(f"inference.py not found at {inference_script_src}")
+    
+    # Validate preprocessing artifacts exist
+    if not os.path.exists(meta_file):
+        logger.error("preprocess_meta.json not found at %s", meta_file)
+        raise FileNotFoundError(f"Missing {meta_file}")
+    
+    logger.info("Found %d label encoders", len(preprocess_artifacts))
+    logger.info("Preprocessing meta file: %s", meta_file)
+    logger.info("Inference script: %s", inference_script_src)
 
     # Iterate over every target folder (e.g. DepartmentCode, AccountCode...)
     for tgt in os.listdir(args.models_dir):
@@ -50,7 +71,10 @@ def main():
         if not os.path.isdir(tgt_dir):
             continue
 
+        logger.info("="*60)
         logger.info("Processing target: %s", tgt)
+        logger.info("="*60)
+        
         model_tar = find_model_tar(tgt_dir)
 
         if not model_tar:
@@ -70,6 +94,13 @@ def main():
         booster_path = os.path.join(extract_dir, "xgboost-model")
         if not os.path.exists(booster_path):
             logger.error("xgboost-model binary not found inside tar for %s", tgt)
+            logger.error("Contents of extract_dir: %s", os.listdir(extract_dir))
+            continue
+
+        # Find class_map.json
+        class_map_path = os.path.join(extract_dir, "class_map.json")
+        if not os.path.exists(class_map_path):
+            logger.error("class_map.json not found for %s", tgt)
             continue
 
         # ---------------------------------------------------------
@@ -80,7 +111,9 @@ def main():
         # └── code/
         #     ├── inference.py
         #     ├── requirements.txt <-- Crucial for sklearn
-        #     └── (artifacts...)
+        #     ├── class_map.json
+        #     ├── preprocess_meta.json
+        #     └── labelenc_*.pkl
         # ---------------------------------------------------------
         
         pkg_root = os.path.join(args.output_dir, f"{tgt}_pkg")
@@ -91,40 +124,71 @@ def main():
         code_dir = os.path.join(pkg_root, "code")
         os.makedirs(code_dir)
 
-        # 1. Move Booster to ROOT
+        # 1. Copy Booster to ROOT of package
+        logger.info("  Copying xgboost-model to root...")
         shutil.copy(booster_path, os.path.join(pkg_root, "xgboost-model"))
 
-        # 2. Move Metadata/Artifacts to CODE directory
-        if os.path.exists(os.path.join(extract_dir, "class_map.json")):
-            shutil.copy(os.path.join(extract_dir, "class_map.json"), code_dir)
+        # 2. Copy class_map.json to CODE directory
+        logger.info("  Copying class_map.json to code/...")
+        shutil.copy(class_map_path, os.path.join(code_dir, "class_map.json"))
 
-        if os.path.exists(meta_file):
-            shutil.copy(meta_file, code_dir)
+        # 3. Copy preprocessing metadata to CODE directory
+        logger.info("  Copying preprocess_meta.json to code/...")
+        shutil.copy(meta_file, os.path.join(code_dir, "preprocess_meta.json"))
 
+        # 4. Copy label encoders to CODE directory
+        logger.info("  Copying %d label encoders to code/...", len(preprocess_artifacts))
         for enc in preprocess_artifacts:
             shutil.copy(enc, code_dir)
 
-        # 3. Copy Inference Script
+        # 5. Copy Inference Script to CODE directory
+        logger.info("  Copying inference.py to code/...")
         shutil.copy(inference_script_src, os.path.join(code_dir, "inference.py"))
 
-        # 4. Create requirements.txt (CRITICAL)
-        # XGBoost containers do NOT have sklearn installed by default.
-        # This forces the endpoint to install it on model load.
+        # 6. Create requirements.txt in CODE directory
+        logger.info("  Creating requirements.txt in code/...")
         with open(os.path.join(code_dir, "requirements.txt"), "w") as req:
             req.write("scikit-learn\n")
             req.write("joblib\n")
             req.write("scipy\n")
 
-        # 5. Create Final Tar
+        # 7. Verify package structure before taring
+        logger.info("  Package structure:")
+        for root, dirs, files in os.walk(pkg_root):
+            level = root.replace(pkg_root, '').count(os.sep)
+            indent = ' ' * 2 * level
+            logger.info(f"  {indent}{os.path.basename(root)}/")
+            subindent = ' ' * 2 * (level + 1)
+            for file in files:
+                logger.info(f"  {subindent}{file}")
+
+        # 8. Create Final Tar with correct structure
         out_tar = os.path.join(args.output_dir, f"{tgt}.tar.gz")
         
+        logger.info("  Creating tar: %s", out_tar)
         with tarfile.open(out_tar, "w:gz") as tar:
-            # Add booster at root
-            tar.add(os.path.join(pkg_root, "xgboost-model"), arcname="xgboost-model")
-            # Add code dir
+            # Add booster at root (arcname ensures it's at root of tar)
+            tar.add(
+                os.path.join(pkg_root, "xgboost-model"), 
+                arcname="xgboost-model"
+            )
+            # Add entire code directory (arcname ensures it's at root/code/)
             tar.add(code_dir, arcname="code")
 
-        logger.info("Packaged %s successfully at %s", tgt, out_tar)
+        logger.info("✅ Packaged %s successfully at %s", tgt, out_tar)
+        
+        # Verify the tar contents
+        logger.info("  Verifying tar contents:")
+        with tarfile.open(out_tar, "r:gz") as tar:
+            for member in tar.getmembers():
+                logger.info(f"    {member.name}")
+        
+        # Clean up temp directory
+        shutil.rmtree(pkg_root)
+
+    logger.info("="*60)
+    logger.info("✅ All targets processed successfully!")
+    logger.info("="*60)
 
 if __name__ == "__main__":
     main()
