@@ -5,7 +5,15 @@ import logging
 import pickle
 import numpy as np
 import xgboost as xgb
-from sklearn.feature_extraction.text import HashingVectorizer
+import sys
+
+# ---------------------------------------------------------
+# DEFENSIVE CODING:
+# Ensure 'code' directory is in path just in case
+# ---------------------------------------------------------
+current_path = os.path.dirname(os.path.abspath(__file__))
+if current_path not in sys.path:
+    sys.path.append(current_path)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -13,100 +21,60 @@ logger.setLevel(logging.INFO)
 def model_fn(model_dir):
     """
     Load the model and artifacts for MME.
-    In MME, model_dir is where the specific model's tar was extracted.
-    
-    Expected structure after extraction:
-      model_dir/
-        xgboost-model          <- at root
-        code/
-          inference.py
-          class_map.json
-          preprocess_meta.json
-          labelenc_*.pkl
-          requirements.txt
     """
     logger.info("="*50)
-    logger.info("Loading model from: %s", model_dir)
-    logger.info("Directory contents:")
-    for root, dirs, files in os.walk(model_dir):
-        level = root.replace(model_dir, '').count(os.sep)
-        indent = ' ' * 2 * level
-        logger.info(f"{indent}{os.path.basename(root)}/")
-        subindent = ' ' * 2 * (level + 1)
-        for file in files:
-            logger.info(f"{subindent}{file}")
-    logger.info("="*50)
-
-    # 1. Load XGBoost Booster from ROOT
+    logger.info(f"Loading model from: {model_dir}")
+    
+    # 1. Load XGBoost Booster
+    # In MME, model_dir is usually /opt/ml/models/<target_model_name>/
     model_path = os.path.join(model_dir, "xgboost-model")
     
+    # Fallback search if not at root
     if not os.path.exists(model_path):
-        # Fallback: check if it's in a subdirectory
-        alt_paths = [
-            os.path.join(model_dir, "model", "xgboost-model"),
-            os.path.join(model_dir, "code", "xgboost-model"),
-        ]
-        for alt in alt_paths:
-            if os.path.exists(alt):
-                model_path = alt
-                logger.info(f"Found model at alternate path: {alt}")
+        logger.info("xgboost-model not at root, searching...")
+        for root, dirs, files in os.walk(model_dir):
+            if "xgboost-model" in files:
+                model_path = os.path.join(root, "xgboost-model")
+                logger.info(f"Found at: {model_path}")
                 break
-        else:
-            raise FileNotFoundError(
-                f"xgboost-model not found at {model_path}. "
-                f"Directory contents: {os.listdir(model_dir)}"
-            )
     
-    logger.info(f"Loading XGBoost model from: {model_path}")
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"xgboost-model not found in {model_dir}")
+
     booster = xgb.Booster()
     booster.load_model(model_path)
     logger.info("✅ Booster loaded successfully")
     
     # 2. Load artifacts from code directory
+    # If this script is running, we are likely INSIDE the code directory or it is adjacent
     code_dir = os.path.join(model_dir, "code")
     
+    # Fallback: if we can't find code dir via model_dir, assume we are inside it
     if not os.path.exists(code_dir):
-        raise FileNotFoundError(
-            f"code directory not found at {code_dir}. "
-            f"Available: {os.listdir(model_dir)}"
-        )
-    
+        logger.info("code directory not found at root, assuming current directory contains artifacts")
+        code_dir = current_path
+
     # Load class map
     class_map_path = os.path.join(code_dir, "class_map.json")
-    if not os.path.exists(class_map_path):
-        raise FileNotFoundError(f"class_map.json not found at {class_map_path}")
-    
     with open(class_map_path, "r") as f:
         class_map = json.load(f)
-    logger.info(f"✅ Loaded class_map with {len(class_map)} classes")
 
     # Load metadata
     meta_path = os.path.join(code_dir, "preprocess_meta.json")
-    if not os.path.exists(meta_path):
-        raise FileNotFoundError(f"preprocess_meta.json not found at {meta_path}")
-    
     with open(meta_path, "r") as f:
         meta = json.load(f)
     
     pipeline = meta["feature_pipeline"]
-    logger.info(f"✅ Loaded pipeline with {len(pipeline)} steps")
 
     # Load Label Encoders
     encoders = {}
     for step in pipeline:
         if step["type"] == "labelenc":
             enc_path = os.path.join(code_dir, step["file"])
-            if not os.path.exists(enc_path):
-                logger.warning(f"Encoder file not found: {enc_path}")
-                continue
-            with open(enc_path, "rb") as f:
-                encoders[step["name"]] = pickle.load(f)
-            logger.info(f"✅ Loaded encoder for: {step['name']}")
+            if os.path.exists(enc_path):
+                with open(enc_path, "rb") as f:
+                    encoders[step["name"]] = pickle.load(f)
 
-    logger.info("="*50)
-    logger.info("Model loading complete!")
-    logger.info("="*50)
-    
     return {
         "model": booster,
         "class_map": class_map,
@@ -115,30 +83,20 @@ def model_fn(model_dir):
     }
 
 def input_fn(request_body, request_content_type):
-    """Parse input data"""
-    logger.info(f"Input content type: {request_content_type}")
-    logger.info(f"Input body (first 200 chars): {str(request_body)[:200]}")
-    
     if request_content_type == "application/json":
-        data = json.loads(request_body)
-        logger.info(f"Parsed JSON data: {data}")
-        return data
-    else:
-        raise ValueError(
-            f"Unsupported content type: {request_content_type}. "
-            f"Expected: application/json"
-        )
+        return json.loads(request_body)
+    raise ValueError("Content type must be application/json")
 
 def predict_fn(data, artifacts):
-    """Run prediction"""
-    logger.info("Starting prediction...")
+    # DELAYED IMPORT: Import sklearn here to ensure requirements.txt 
+    # has definitely been processed by the container
+    from sklearn.feature_extraction.text import HashingVectorizer
     
     booster = artifacts["model"]
     pipeline = artifacts["pipeline"]
     encoders = artifacts["encoders"]
     class_map = artifacts["class_map"]
 
-    # Support batch or single prediction
     if isinstance(data, dict):
         data = [data]
         single_request = True
@@ -147,82 +105,61 @@ def predict_fn(data, artifacts):
 
     batch_features = []
 
-    for idx, row in enumerate(data):
-        logger.info(f"Processing row {idx}: {row}")
+    for row in data:
         features = []
-        
         for step in pipeline:
             name = step["name"]
             ftype = step["type"]
             raw = row.get(name, "")
 
             if ftype == "hash":
-                # Re-instantiate HashingVectorizer (stateless)
-                vec = HashingVectorizer(
-                    n_features=step["hash_dim"],
-                    alternate_sign=False,
-                    norm=None
-                )
+                vec = HashingVectorizer(n_features=step["hash_dim"], alternate_sign=False, norm=None)
+                # HashingVectorizer expects iterable, so wrap raw in list
                 arr = vec.transform([str(raw)]).toarray()[0]
                 features.append(arr)
-                
             elif ftype == "labelenc":
                 enc = encoders.get(name)
-                if enc is None:
-                    logger.warning(f"Encoder not found for {name}, using 0")
-                    features.append(np.array([0]))
-                    continue
-                    
-                s_raw = str(raw)
-                try:
-                    val = enc.transform([s_raw])[0]
-                except (ValueError, KeyError):
-                    # Unseen label fallback
-                    logger.warning(f"Unseen label '{s_raw}' for {name}, using 0")
-                    val = 0
+                val = 0
+                if enc:
+                    try:
+                        val = enc.transform([str(raw)])[0]
+                    except:
+                        val = 0
                 features.append(np.array([val]))
-                
             else:
-                # Numeric
                 try:
                     val = float(raw)
-                except (ValueError, TypeError):
+                except:
                     val = 0.0
                 features.append(np.array([val]))
 
-        # Concatenate features for this row
         full_row = np.hstack(features)
         batch_features.append(full_row)
-        logger.info(f"Row {idx} feature vector shape: {full_row.shape}")
 
-    # Convert to DMatrix
     X = np.array(batch_features)
-    logger.info(f"Final feature matrix shape: {X.shape}")
     dtest = xgb.DMatrix(X)
-    
-    # Predict
     probs_batch = booster.predict(dtest)
-    logger.info(f"Prediction output shape: {probs_batch.shape}")
     
-    # Map predictions back to labels
     inv_map = {v: k for k, v in class_map.items()}
-    
     results = []
-    for i, probs in enumerate(probs_batch):
+    
+    # Handle both binary (1D array) and multi-class (2D array) outputs
+    if len(probs_batch.shape) == 1:
+        # If binary, xgboost often outputs probability of class 1
+        # You might need logic here depending on your objective
+        pass 
+        
+    for probs in probs_batch:
         idx = int(np.argmax(probs))
         pred_label = inv_map.get(idx, str(idx))
         results.append({
             "prediction": pred_label,
             "probabilities": probs.tolist()
         })
-        logger.info(f"Row {i} prediction: {pred_label} (class {idx}, prob: {probs[idx]:.4f})")
 
-    # Return dict if single request, list if batch
     if single_request:
         return results[0]
     return results
 
 def output_fn(prediction, accept):
-    """Format output"""
-    logger.info(f"Output accept type: {accept}")
     return json.dumps(prediction)

@@ -28,38 +28,31 @@ container_uri = sagemaker.image_uris.retrieve(
 # ============================
 # Step 1: Create Model - ONLY SAGEMAKER_PROGRAM
 # ============================
+# ============================
+# Step 1: Create Model - CORRECTED
+# ============================
 try:
+    # Delete existing model if you need to update config
+    try:
+        sm_client.delete_model(ModelName=MODEL_NAME)
+        print(f"Deleted existing model: {MODEL_NAME}")
+    except:
+        pass
+
     sm_client.create_model(
         ModelName=MODEL_NAME,
         PrimaryContainer={
             'Image': container_uri,
             'ModelDataUrl': MME_S3,
-            'Mode': 'MultiModel',
-            'Environment': {
-                # ⭐ CRITICAL: Only set SAGEMAKER_PROGRAM
-                # Do NOT set SAGEMAKER_SUBMIT_DIRECTORY for MME
-                'SAGEMAKER_PROGRAM': 'inference.py'
-            }
+            'Mode': 'MultiModel'
+            # REMOVED 'Environment' block completely.
+            # The container will auto-discover code/inference.py inside the .tar.gz
         },
         ExecutionRoleArn=role
     )
     print(f"✅ Created model: {MODEL_NAME}")
-except sm_client.exceptions.ResourceInUse:
-    print(f"⚠️ Model {MODEL_NAME} already exists - deleting and recreating...")
-    sm_client.delete_model(ModelName=MODEL_NAME)
-    sm_client.create_model(
-        ModelName=MODEL_NAME,
-        PrimaryContainer={
-            'Image': container_uri,
-            'ModelDataUrl': MME_S3,
-            'Mode': 'MultiModel',
-            'Environment': {
-                'SAGEMAKER_PROGRAM': 'inference.py'
-            }
-        },
-        ExecutionRoleArn=role
-    )
-    print(f"✅ Recreated model: {MODEL_NAME}")
+except Exception as e:
+    print(f"❌ Error creating model: {e}")
 
 # ============================
 # Step 2: Create Endpoint Configuration
