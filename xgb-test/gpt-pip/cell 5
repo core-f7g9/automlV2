@@ -2,37 +2,49 @@
 import json
 import os
 import logging
-
-import numpy as np
 import pickle
+import numpy as np
 import xgboost as xgb
+# This import will now succeed because requirements.txt installs it
 from sklearn.feature_extraction.text import HashingVectorizer
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 def model_fn(model_dir):
-    logger.info("=== model_fn called model_dir=%s ===", model_dir)
+    """
+    Load the model and artifacts.
+    model_dir is where the tarball was unpacked.
+    
+    Standard Structure:
+      model_dir/xgboost-model
+      model_dir/code/...
+    """
+    logger.info("Loading model from: %s", model_dir)
 
-    model_path = os.path.join(model_dir, "model", "xgboost-model")
-    code_dir = os.path.join(model_dir, "code")
-
-    # Load booster
+    # 1. Load XGBoost Booster (Now at ROOT of model_dir)
+    model_path = os.path.join(model_dir, "xgboost-model")
+    
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"xgboost-model not found at {model_path}. Directory list: {os.listdir(model_dir)}")
+        
     booster = xgb.Booster()
     booster.load_model(model_path)
-    logger.info("Loaded booster OK")
-
+    
+    # 2. Path to artifacts (inside 'code' directory)
+    code_dir = os.path.join(model_dir, "code")
+    
     # Load class map
-    with open(os.path.join(code_dir, "class_map.json")) as f:
+    with open(os.path.join(code_dir, "class_map.json"), "r") as f:
         class_map = json.load(f)
 
     # Load metadata
-    with open(os.path.join(code_dir, "preprocess_meta.json")) as f:
+    with open(os.path.join(code_dir, "preprocess_meta.json"), "r") as f:
         meta = json.load(f)
 
     pipeline = meta["feature_pipeline"]
 
-    # Load all encoders
+    # Load Label Encoders
     encoders = {}
     for step in pipeline:
         if step["type"] == "labelenc":
@@ -40,6 +52,8 @@ def model_fn(model_dir):
             with open(enc_path, "rb") as f:
                 encoders[step["name"]] = pickle.load(f)
 
+    logger.info("Model and artifacts loaded successfully")
+    
     return {
         "model": booster,
         "class_map": class_map,
@@ -48,7 +62,10 @@ def model_fn(model_dir):
     }
 
 def input_fn(request_body, request_content_type):
-    return json.loads(request_body)
+    if request_content_type == "application/json":
+        return json.loads(request_body)
+    else:
+        raise ValueError(f"Unsupported content type: {request_content_type}")
 
 def predict_fn(data, artifacts):
     booster = artifacts["model"]
@@ -56,36 +73,73 @@ def predict_fn(data, artifacts):
     encoders = artifacts["encoders"]
     class_map = artifacts["class_map"]
 
-    features = []
+    # Support batch or single prediction
+    if isinstance(data, dict):
+        data = [data]
 
-    for step in pipeline:
-        name = step["name"]
-        ftype = step["type"]
-        raw = data.get(name, "")
+    batch_features = []
 
-        if ftype == "hash":
-            vec = HashingVectorizer(
-                n_features=step["hash_dim"],
-                alternate_sign=False,
-                norm=None
-            )
-            arr = vec.transform([str(raw)]).toarray()[0]
-            features.append(arr)
-        elif ftype == "labelenc":
-            enc = encoders[name]
-            val = enc.transform([str(raw)])[0]
-            features.append(np.array([val]))
-        else:
-            val = float(raw) if raw not in ("", None) else 0.0
-            features.append(np.array([val]))
+    for row in data:
+        features = []
+        for step in pipeline:
+            name = step["name"]
+            ftype = step["type"]
+            raw = row.get(name, "")
 
-    X = np.hstack(features).reshape(1, -1)
-    probs = booster.predict(xgb.DMatrix(X))[0]
-    idx = int(np.argmax(probs))
+            if ftype == "hash":
+                # Re-instantiate HashingVectorizer (stateless)
+                vec = HashingVectorizer(
+                    n_features=step["hash_dim"],
+                    alternate_sign=False,
+                    norm=None
+                )
+                # transform returns sparse, convert to dense array
+                arr = vec.transform([str(raw)]).toarray()[0]
+                features.append(arr)
+            elif ftype == "labelenc":
+                enc = encoders[name]
+                s_raw = str(raw)
+                try:
+                    val = enc.transform([s_raw])[0]
+                except ValueError:
+                    # Unseen label fallback
+                    val = 0 
+                features.append(np.array([val]))
+            else:
+                # Numeric
+                try:
+                    val = float(raw)
+                except (ValueError, TypeError):
+                    val = 0.0
+                features.append(np.array([val]))
 
-    inv = {v: k for k, v in class_map.items()}
+        # Concatenate features for this row
+        full_row = np.hstack(features)
+        batch_features.append(full_row)
 
-    return {"prediction": inv[idx], "probabilities": probs.tolist()}
+    # Convert to DMatrix
+    X = np.array(batch_features)
+    dtest = xgb.DMatrix(X)
+    
+    # Predict
+    probs_batch = booster.predict(dtest)
+    
+    # Map predictions back to labels
+    inv_map = {v: k for k, v in class_map.items()}
+    
+    results = []
+    for probs in probs_batch:
+        idx = int(np.argmax(probs))
+        pred_label = inv_map.get(idx, str(idx))
+        results.append({
+            "prediction": pred_label, 
+            "probabilities": probs.tolist()
+        })
+
+    # Return list if batch, dict if single
+    if len(results) == 1:
+        return results[0]
+    return results
 
 def output_fn(prediction, accept):
     return json.dumps(prediction)
