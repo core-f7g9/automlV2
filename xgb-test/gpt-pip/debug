@@ -18,3 +18,43 @@ with tarfile.open("DepartmentCode.tar.gz", "r:gz") as tar:
     print("\n=== TAR CONTENTS ===")
     for name in tar.getnames():
         print(name)
+
+
+
+
+import boto3
+
+s3 = boto3.client("s3")
+bucket = BUCKET
+key = f"{PROJECT_PREFIX}/mme-packaged/DepartmentCode.tar.gz"
+
+s3.download_file(bucket, key, "DepartmentCode.tar.gz")
+print("Downloaded DepartmentCode.tar.gz")
+
+import tarfile
+import os
+
+extract_dir = "dept_test_model"
+os.makedirs(extract_dir, exist_ok=True)
+
+with tarfile.open("DepartmentCode.tar.gz", "r:gz") as tar:
+    tar.extractall(extract_dir)
+
+print("Extracted to:", extract_dir)
+print(os.listdir(extract_dir))
+print("code/", os.listdir(os.path.join(extract_dir, "code")))
+
+import json
+import inference   # from your inference.py
+
+artifacts = inference.model_fn("dept_test_model")
+
+test_payload = {
+    "VendorName": "ACME Supplies",
+    "LineDescription": "Office Chair ergonomic",
+    "ClubNumber": 123
+}
+
+result = inference.predict_fn(test_payload, artifacts)
+print(json.dumps(result, indent=2))
+
