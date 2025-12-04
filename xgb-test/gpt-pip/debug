@@ -24,37 +24,62 @@ with tarfile.open("DepartmentCode.tar.gz", "r:gz") as tar:
 
 import boto3
 
-s3 = boto3.client("s3")
 bucket = BUCKET
-key = f"{PROJECT_PREFIX}/mme-packaged/DepartmentCode.tar.gz"
+model_name = "DepartmentCode.tar.gz"  # <<< change this for other targets
+prefix = f"{PROJECT_PREFIX}/mme-packaged"
 
-s3.download_file(bucket, key, "DepartmentCode.tar.gz")
-print("Downloaded DepartmentCode.tar.gz")
+s3_key = f"{prefix}/{model_name}"
 
-import tarfile
-import os
+print("Downloading:", s3_key)
 
-extract_dir = "dept_test_model"
+s3 = boto3.client("s3")
+s3.download_file(bucket, s3_key, model_name)
+
+print("Downloaded:", model_name)
+
+import tarfile, os
+
+model_tar = "DepartmentCode.tar.gz"
+extract_dir = "test_model"
+
+# Clean up if folder already exists
+if os.path.exists(extract_dir):
+    import shutil
+    shutil.rmtree(extract_dir)
+
 os.makedirs(extract_dir, exist_ok=True)
 
-with tarfile.open("DepartmentCode.tar.gz", "r:gz") as tar:
+with tarfile.open(model_tar, "r:gz") as tar:
     tar.extractall(extract_dir)
 
 print("Extracted to:", extract_dir)
-print(os.listdir(extract_dir))
-print("code/", os.listdir(os.path.join(extract_dir, "code")))
+
+print("Root contents:", os.listdir(extract_dir))
+print("Code contents:", os.listdir(os.path.join(extract_dir, "code")))
 
 import json
-import inference   # from your inference.py
+import sys
+import os
 
-artifacts = inference.model_fn("dept_test_model")
+# Add the code directory to Python path so inference.py can be imported
+code_dir = os.path.join("test_model", "code")
+if code_dir not in sys.path:
+    sys.path.append(code_dir)
 
+# Import inference
+import inference
+
+# Load artifacts (this calls model_fn inside inference.py)
+artifacts = inference.model_fn("test_model")
+
+# Prepare a test row (modify the fields to match your dataset)
 test_payload = {
-    "VendorName": "ACME Supplies",
-    "LineDescription": "Office Chair ergonomic",
+    "VendorName": "OfficeMax Inc",
+    "LineDescription": "Black swivel chair with ergonomic back support",
     "ClubNumber": 123
 }
 
+# Run prediction
 result = inference.predict_fn(test_payload, artifacts)
-print(json.dumps(result, indent=2))
 
+print(json.dumps(result, indent=2))
