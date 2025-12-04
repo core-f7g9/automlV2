@@ -18,12 +18,12 @@ sample_payload = {
     "ClubNumber": 123
 }
 
-# choose one of the packaged models
 target_model = "DepartmentCode.tar.gz"
 
 response = predictor.predict(
     json.dumps(sample_payload),
-    target_model=target_model
+    target_model=target_model,
+    content_type="application/json"
 )
 
 print("Raw response:", response)
@@ -43,5 +43,6 @@ for m in targets:
     resp = predictor.predict(
         json.dumps(sample_payload),
         target_model=m
+        content_type="application/json"
     )
     print(resp)
