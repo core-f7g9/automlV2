@@ -33,7 +33,7 @@ def main():
     params = {
         "objective": "multi:softprob",
         "num_class": len(class_map),
-        "eval_metric": "mlogloss",
+        "eval_metric": ["mlogloss", "merror"],
         "tree_method": "hist",
         "max_depth": 8,
         "eta": 0.2
