@@ -1,3 +1,6 @@
+# ============================
+# CELL A5 — Test Invocation
+# ============================
 from sagemaker.predictor import Predictor
 from sagemaker.serializers import JSONSerializer
 from sagemaker.deserializers import JSONDeserializer
@@ -9,14 +12,6 @@ predictor = Predictor(
     deserializer=JSONDeserializer()
 )
 
-
-print("Reattached Predictor:", predictor.endpoint_name)
-
-# ============================
-# CELL A5 — Invoke Endpoint
-# ============================
-import json
-
 sample_payload = {
     "VendorName": "Acme Corp",
     "LineDescription": "Office supplies monthly invoice",
@@ -26,14 +21,14 @@ sample_payload = {
 target_model = "DepartmentCode.tar.gz"
 
 response = predictor.predict(
-    json.dumps(sample_payload),
-    target_model=target_model,
+    sample_payload,  # Just pass the dict, serializer handles JSON
+    target_model=target_model
 )
 
-print("Raw response:", response)
+print("\n✅ Response:", response)
 
 # ============================
-# CELL A6 — Test all target models
+# CELL A6 — Test All Models
 # ============================
 targets = [
     "DepartmentCode.tar.gz",
@@ -43,9 +38,12 @@ targets = [
 ]
 
 for m in targets:
-    print("\n===== Testing:", m, "=====")
-    resp = predictor.predict(
-        json.dumps(sample_payload),
-        target_model=m
-    )
-    print(resp)
+    print(f"\n{'='*50}")
+    print(f"Testing: {m}")
+    print('='*50)
+    try:
+        resp = predictor.predict(sample_payload, target_model=m)
+        print("Prediction:", resp.get("prediction"))
+        print("Top 3 probabilities:", resp.get("probabilities", [])[:3])
+    except Exception as e:
+        print(f"❌ Error: {e}")

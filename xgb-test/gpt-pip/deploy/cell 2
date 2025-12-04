@@ -1,5 +1,5 @@
 # ============================
-# CELL A3 — Create MultiDataModel container
+# CELL A3 — Create MultiDataModel with Entry Point
 # ============================
 container_uri = sagemaker.image_uris.retrieve(
     framework="xgboost",
@@ -7,12 +7,19 @@ container_uri = sagemaker.image_uris.retrieve(
     version="1.5-1"
 )
 
+# CRITICAL FIX: Specify the entry point and environment
 mme = MultiDataModel(
     name=MODEL_NAME,
-    model_data_prefix=MME_S3,   # S3 folder containing all .tar.gz models
+    model_data_prefix=MME_S3,
     image_uri=container_uri,
     role=role,
-    sagemaker_session=sm_sess
+    sagemaker_session=sm_sess,
+    entry_point="inference.py",  # Tell it to use your custom script
+    source_dir=None,              # Code is already in the tar
+    env={
+        'SAGEMAKER_PROGRAM': 'inference.py',  # Entry point file
+        'SAGEMAKER_SUBMIT_DIRECTORY': '/opt/ml/model/code'  # Where code lives
+    }
 )
 
 print("MultiDataModel created:", MODEL_NAME)
