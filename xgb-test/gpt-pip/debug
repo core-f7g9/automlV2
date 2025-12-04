@@ -1,0 +1,20 @@
+import boto3
+import os
+
+BUCKET = sm_sess.default_bucket()
+MME_PREFIX = f"{PROJECT_PREFIX}/mme-packaged"
+
+model_key = f"{MME_PREFIX}/DepartmentCode.tar.gz"
+local_path = "DepartmentCode.tar.gz"
+
+s3 = boto3.client("s3")
+s3.download_file(BUCKET, model_key, local_path)
+
+print("Downloaded:", local_path)
+
+import tarfile
+
+with tarfile.open("DepartmentCode.tar.gz", "r:gz") as tar:
+    print("\n=== TAR CONTENTS ===")
+    for name in tar.getnames():
+        print(name)
