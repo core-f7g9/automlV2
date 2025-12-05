@@ -1,3 +1,48 @@
+import boto3, sagemaker
+
+region = boto3.Session().region_name
+sm = boto3.client("sagemaker", region_name=region)
+
+PROJECT_PREFIX = PROJECT_PREFIX if "PROJECT_PREFIX" in globals() else "multi-target-xgb"
+endpoint_name = f"{PROJECT_PREFIX}-custom-endpoint"
+model_name    = f"{PROJECT_PREFIX}-custom-model"
+
+def safe_delete_endpoint(name):
+    try:
+        sm.delete_endpoint(EndpointName=name)
+        print("Deleted endpoint:", name)
+    except sm.exceptions.ClientError as e:
+        if "Could not find endpoint" in str(e):
+            print("Endpoint not found:", name)
+        else:
+            raise
+
+def safe_delete_endpoint_config(name):
+    try:
+        sm.delete_endpoint_config(EndpointConfigName=name)
+        print("Deleted endpoint config:", name)
+    except sm.exceptions.ClientError as e:
+        if "Could not find endpoint configuration" in str(e):
+            print("Endpoint config not found:", name)
+        else:
+            raise
+
+def safe_delete_model(name):
+    try:
+        sm.delete_model(ModelName=name)
+        print("Deleted model:", name)
+    except sm.exceptions.ClientError as e:
+        if "Could not find model" in str(e):
+            print("Model not found:", name)
+        else:
+            raise
+
+safe_delete_endpoint(endpoint_name)
+safe_delete_endpoint_config(endpoint_name)  # config usually same name as endpoint
+safe_delete_model(model_name)
+
+
+
 # ============================
 # Deploy custom multi-target XGBoost endpoint (dynamic)
 # ============================
@@ -5,7 +50,6 @@ import boto3, sagemaker
 from sagemaker.model import Model
 from sagemaker import get_execution_role
 
-# Reuse existing variables when available
 region = region if "region" in globals() else boto3.Session().region_name
 sm_sess = sm_session if "sm_session" in globals() else sagemaker.Session()
 role = role if "role" in globals() else get_execution_role()
@@ -13,21 +57,16 @@ role = role if "role" in globals() else get_execution_role()
 BUCKET = BUCKET if "BUCKET" in globals() else sm_sess.default_bucket()
 PROJECT_PREFIX = PROJECT_PREFIX if "PROJECT_PREFIX" in globals() else "multi-target-xgb"
 
-# combined_model_uri was created by build_combined_artifact()
 if "combined_model_uri" not in globals():
-    raise RuntimeError(
-        "combined_model_uri is not defined. Make sure you ran the combine step first."
-    )
+    raise RuntimeError("combined_model_uri is not defined. Run the combine step first.")
 
-# ECR image info (same repo name you used in CloudShell)
 account_id = boto3.client("sts").get_caller_identity()["Account"]
-repo_name = "multi-target-xgb-custom"  # must match CloudShell REPO_NAME
+repo_name = "multi-target-xgb-custom"
 
 image_uri = f"{account_id}.dkr.ecr.{region}.amazonaws.com/{repo_name}:latest"
 print("Using image URI:", image_uri)
 print("Using model data URI:", combined_model_uri)
 
-# Dynamic names based on PROJECT_PREFIX
 model_name = f"{PROJECT_PREFIX}-custom-model"
 endpoint_name = f"{PROJECT_PREFIX}-custom-endpoint"
 
@@ -42,7 +81,8 @@ multi_model = Model(
 predictor = multi_model.deploy(
     endpoint_name=endpoint_name,
     initial_instance_count=1,
-    instance_type="ml.m5.xlarge",  # tweak if you want smaller/larger
+    instance_type="ml.m5.xlarge",
 )
 
 print("✅ Endpoint deployed:", endpoint_name)
+

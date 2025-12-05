@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
-    flask gunicorn \
+    flask \
     xgboost==1.5.2 \
     scikit-learn \
     scipy \
@@ -20,5 +20,8 @@ WORKDIR /opt/program
 
 COPY server.py /opt/program/server.py
 
-CMD ["gunicorn", "--workers", "1", "--bind", "0.0.0.0:8080", "server:app"]
+EXPOSE 8080
+
+# Just run Flask app directly
+CMD ["python", "server.py"]
 EOF
