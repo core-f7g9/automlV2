@@ -1,0 +1,85 @@
+# ============================
+# Sample 100 records and check accuracy per target
+# ============================
+import boto3
+import json
+import pandas as pd
+import sagemaker
+
+# --- Reuse existing globals when possible ---
+region = region if "region" in globals() else boto3.Session().region_name
+sm_sess = sm_session if "sm_session" in globals() else sagemaker.Session()
+BUCKET = BUCKET if "BUCKET" in globals() else sm_sess.default_bucket()
+PROJECT_PREFIX = PROJECT_PREFIX if "PROJECT_PREFIX" in globals() else "multi-target-xgb"
+
+# Input data location (same as pipeline)
+INPUT_S3 = INPUT_S3 if "INPUT_S3" in globals() else f"s3://{BUCKET}/{PROJECT_PREFIX}/input/data.csv"
+
+# Targets & features (same as pipeline)
+TARGET_COLS = TARGET_COLS if "TARGET_COLS" in globals() else [
+    "DepartmentCode",
+    "AccountCode",
+    "SubAccountCode",
+    "LocationCode",
+]
+INPUT_FEATURES = INPUT_FEATURES if "INPUT_FEATURES" in globals() else [
+    "VendorName",
+    "LineDescription",
+    "ClubNumber",
+]
+
+# Endpoint name (same pattern as deploy cell)
+endpoint_name = f"{PROJECT_PREFIX}-custom-endpoint"
+runtime = boto3.client("sagemaker-runtime", region_name=region)
+
+# --- Load dataset from S3 ---
+print("Reading data from:", INPUT_S3)
+df = pd.read_csv(INPUT_S3)
+
+print("Total rows in dataset:", len(df))
+
+N_SAMPLES = 100
+results = {}
+
+for tgt in TARGET_COLS:
+    # Only keep rows where this target is present
+    df_t = df[df[tgt].notna()].copy()
+    if df_t.empty:
+        print(f"\n[tgt={tgt}] No non-null rows, skipping.")
+        continue
+
+    n = min(N_SAMPLES, len(df_t))
+    sample = df_t.sample(n=n, random_state=42)
+
+    # Build instances list from input feature columns
+    instances = sample[INPUT_FEATURES].to_dict(orient="records")
+
+    payload = {
+        "target": tgt,
+        "instances": instances,
+    }
+
+    response = runtime.invoke_endpoint(
+        EndpointName=endpoint_name,
+        ContentType="application/json",
+        Body=json.dumps(payload),
+    )
+
+    resp_json = json.loads(response["Body"].read().decode("utf-8"))
+    preds = [p["prediction"] for p in resp_json["predictions"]]
+
+    # Compare with ground truth
+    sample["pred"] = preds
+    # Cast both to str to avoid label-type mismatch
+    acc = (sample[tgt].astype(str) == sample["pred"].astype(str)).mean()
+    results[tgt] = acc
+
+    print(f"\nTarget: {tgt}")
+    print(f"  Evaluated on {n} rows")
+    print(f"  Accuracy: {acc:.4f}")
+    print("  Sample predictions:")
+    print(sample[[*INPUT_FEATURES, tgt, "pred"]].head())
+
+print("\n=== Summary ===")
+for tgt, acc in results.items():
+    print(f"{tgt}: accuracy = {acc:.4f}")
