@@ -1,0 +1,68 @@
+import os
+import tarfile
+import tempfile
+import pathlib as pl
+import boto3, sagemaker
+
+region = boto3.Session().region_name
+sm_sess = sagemaker.Session()
+BUCKET = sm_sess.default_bucket()
+
+PROJECT_PREFIX = "multi-target-xgb"
+MME_OUTPUT = f"{PROJECT_PREFIX}/mme-packaged"   # where repack step wrote the tars
+COMBINED_PREFIX = f"{PROJECT_PREFIX}/combined"  # we'll put combined tar here
+
+s3 = boto3.client("s3")
+
+def build_combined_artifact():
+    tmp_root = tempfile.mkdtemp()
+    models_dir = os.path.join(tmp_root, "models")
+    os.makedirs(models_dir, exist_ok=True)
+
+    # 1) Find all per-target tar.gz files
+    paginator = s3.get_paginator("list_objects_v2")
+    page_iter = paginator.paginate(Bucket=BUCKET, Prefix=MME_OUTPUT)
+
+    tars = []
+    for page in page_iter:
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith(".tar.gz"):
+                tars.append(key)
+
+    if not tars:
+        raise RuntimeError(f"No *.tar.gz found under s3://{BUCKET}/{MME_OUTPUT}")
+
+    print("Found model tars:")
+    for key in tars:
+        print("  ", key)
+
+    # 2) For each target tar, extract into models/<TargetName>/
+    for key in tars:
+        tgt = pl.Path(key).stem            # e.g. DepartmentCode
+        tgt_dir = os.path.join(models_dir, tgt)
+        os.makedirs(tgt_dir, exist_ok=True)
+
+        local_tar = os.path.join(tmp_root, os.path.basename(key))
+        print(f"Downloading {key} -> {local_tar}")
+        s3.download_file(BUCKET, key, local_tar)
+
+        print(f"Extracting into {tgt_dir}")
+        with tarfile.open(local_tar, "r:gz") as tar:
+            tar.extractall(tgt_dir)
+
+    # 3) Create model.tar.gz with root folder "models/"
+    out_tar = os.path.join(tmp_root, "model.tar.gz")
+    print(f"Creating combined tar: {out_tar}")
+    with tarfile.open(out_tar, "w:gz") as tar:
+        tar.add(models_dir, arcname="models")
+
+    # 4) Upload to S3
+    combined_key = f"{COMBINED_PREFIX}/model.tar.gz"
+    print(f"Uploading to s3://{BUCKET}/{combined_key}")
+    s3.upload_file(out_tar, BUCKET, combined_key)
+
+    return f"s3://{BUCKET}/{combined_key}"
+
+combined_model_uri = build_combined_artifact()
+print("✅ Combined model artifact at:", combined_model_uri)

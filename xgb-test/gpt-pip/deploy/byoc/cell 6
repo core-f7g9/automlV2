@@ -1,0 +1,35 @@
+import boto3, sagemaker
+from sagemaker.model import Model
+from sagemaker import get_execution_role
+
+region = boto3.Session().region_name
+sm_sess = sagemaker.Session()
+role = get_execution_role()
+
+ACCOUNT_ID = boto3.client("sts").get_caller_identity()["Account"]
+REPO_NAME = "multi-target-xgb-custom"
+
+image_uri = f"{ACCOUNT_ID}.dkr.ecr.{region}.amazonaws.com/{REPO_NAME}:latest"
+
+# Use the value printed from STEP 1
+model_data = combined_model_uri   # e.g. "s3://.../multi-target-xgb/combined/model.tar.gz"
+
+print("Image URI:", image_uri)
+print("Model data:", model_data)
+
+multi_model = Model(
+    image_uri=image_uri,
+    model_data=model_data,
+    role=role,
+    name="multi-target-xgb-custom-model",
+    sagemaker_session=sm_sess,
+)
+
+endpoint_name = "multi-target-xgb-custom-ep"
+
+predictor = multi_model.deploy(
+    endpoint_name=endpoint_name,
+    initial_instance_count=1,
+    instance_type="ml.m5.xlarge",
+)
+print("✅ Endpoint deployed:", endpoint_name)

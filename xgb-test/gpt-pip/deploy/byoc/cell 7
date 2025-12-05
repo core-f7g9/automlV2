@@ -1,0 +1,22 @@
+import json, boto3
+
+runtime = boto3.client("sagemaker-runtime", region_name=region)
+
+test_payload = {
+    "target": "DepartmentCode",   # or AccountCode, SubAccountCode, LocationCode
+    "instances": [
+        {
+            "VendorName": "ACME SUPPLIES INC",
+            "LineDescription": "Office chairs and desks",
+            "ClubNumber": 123,
+        }
+    ]
+}
+
+response = runtime.invoke_endpoint(
+    EndpointName=endpoint_name,
+    ContentType="application/json",
+    Body=json.dumps(test_payload),
+)
+
+print(json.loads(response["Body"].read().decode("utf-8")))

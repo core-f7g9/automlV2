@@ -1,0 +1,175 @@
+import os
+import json
+import logging
+
+import numpy as np
+import xgboost as xgb
+from flask import Flask, request, jsonify
+from sklearn.feature_extraction.text import HashingVectorizer
+import joblib
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+MODEL_ROOT = os.environ.get("MODEL_DIR", "/opt/ml/model")
+
+# -------------------------------------------------
+# Load all target models at startup
+# -------------------------------------------------
+def load_all_models():
+    bundles = {}
+    models_dir = os.path.join(MODEL_ROOT, "models")
+    logger.info("Looking for models under %s", models_dir)
+
+    if not os.path.exists(models_dir):
+        logger.error("models/ directory not found in %s", MODEL_ROOT)
+        return bundles
+
+    for tgt in os.listdir(models_dir):
+        tgt_dir = os.path.join(models_dir, tgt)
+        if not os.path.isdir(tgt_dir):
+            continue
+
+        logger.info("Loading target: %s", tgt)
+
+        booster_path = os.path.join(tgt_dir, "xgboost-model")
+        class_map_path = os.path.join(tgt_dir, "code", "class_map.json")
+        meta_path = os.path.join(tgt_dir, "code", "preprocess_meta.json")
+
+        if not os.path.exists(booster_path):
+            logger.warning("Missing xgboost-model for %s; skipping", tgt)
+            continue
+        if not os.path.exists(class_map_path):
+            logger.warning("Missing class_map.json for %s; skipping", tgt)
+            continue
+        if not os.path.exists(meta_path):
+            logger.warning("Missing preprocess_meta.json for %s; skipping", tgt)
+            continue
+
+        booster = xgb.Booster()
+        booster.load_model(booster_path)
+
+        with open(class_map_path) as f:
+            class_map = json.load(f)
+        with open(meta_path) as f:
+            meta = json.load(f)
+
+        pipeline = meta["feature_pipeline"]
+
+        encoders = {}
+        for step in pipeline:
+            if step["type"] == "labelenc":
+                enc_path = os.path.join(tgt_dir, "code", step["file"])
+                if os.path.exists(enc_path):
+                    encoders[step["name"]] = joblib.load(enc_path)
+
+        bundles[tgt] = {
+            "booster": booster,
+            "class_map": class_map,
+            "pipeline": pipeline,
+            "encoders": encoders,
+        }
+
+    logger.info("Loaded targets: %s", list(bundles.keys()))
+    return bundles
+
+
+MODEL_BUNDLES = load_all_models()
+
+
+def build_features(rows, pipeline, encoders):
+    batch = []
+    for row in rows:
+        features = []
+        for step in pipeline:
+            name = step["name"]
+            ftype = step["type"]
+            raw = row.get(name, "")
+
+            if ftype == "hash":
+                vec = HashingVectorizer(
+                    n_features=step["hash_dim"],
+                    alternate_sign=False,
+                    norm=None
+                )
+                arr = vec.transform([str(raw)]).toarray()[0]
+                features.append(arr)
+
+            elif ftype == "labelenc":
+                enc = encoders.get(name)
+                if enc:
+                    try:
+                        val = enc.transform([str(raw)])[0]
+                    except Exception:
+                        val = 0
+                else:
+                    val = 0
+                features.append(np.array([val]))
+
+            else:
+                # numeric
+                try:
+                    val = float(raw)
+                except Exception:
+                    val = 0.0
+                features.append(np.array([val]))
+
+        batch.append(np.hstack(features))
+    return np.array(batch)
+
+
+# -------------------------------------------------
+# Flask app
+# -------------------------------------------------
+app = Flask(__name__)
+
+
+@app.route("/ping", methods=["GET"])
+def ping():
+    status = 200 if MODEL_BUNDLES else 500
+    return "", status
+
+
+@app.route("/invocations", methods=["POST"])
+def invocations():
+    payload = request.get_json()
+
+    # Expected:
+    # {
+    #   "target": "DepartmentCode",
+    #   "instances": [ { "VendorName": "...", "LineDescription": "...", "ClubNumber": 123 }, ... ]
+    # }
+    if not isinstance(payload, dict):
+        return jsonify(error="Expected JSON object"), 400
+
+    target = payload.get("target")
+    rows = payload.get("instances")
+
+    if not target or not isinstance(rows, list):
+        return jsonify(
+            error="Expected { 'target': <str>, 'instances': [ {...}, ... ] }"
+        ), 400
+
+    bundle = MODEL_BUNDLES.get(target)
+    if bundle is None:
+        return jsonify(
+            error=f"Unknown target '{target}'. Available={list(MODEL_BUNDLES.keys())}"
+        ), 400
+
+    booster = bundle["booster"]
+    pipeline = bundle["pipeline"]
+    encoders = bundle["encoders"]
+    class_map = bundle["class_map"]
+    inv_map = {v: k for k, v in class_map.items()}
+
+    X = build_features(rows, pipeline, encoders)
+    dtest = xgb.DMatrix(X)
+    probs = booster.predict(dtest)
+
+    results = []
+    for p in probs:
+        idx = int(np.argmax(p))
+        label = inv_map.get(idx, str(idx))
+        results.append({"prediction": label, "probabilities": p.tolist()})
+
+    return jsonify({"target": target, "predictions": results})

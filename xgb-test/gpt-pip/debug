@@ -83,3 +83,63 @@ test_payload = {
 result = inference.predict_fn(test_payload, artifacts)
 
 print(json.dumps(result, indent=2))
+
+
+
+
+
+
+import sagemaker
+import boto3
+
+runtime = boto3.client("sagemaker-runtime")
+sm = boto3.client("sagemaker")
+
+bucket = BUCKET
+model_key = f"{PROJECT_PREFIX}/mme-packaged/DepartmentCode.tar.gz"
+
+model_name = "deptcode-single-model"
+endpoint_config_name = "deptcode-single-model-config"
+endpoint_name = "deptcode-single-model-endpoint"
+
+print("S3 model path:", f"s3://{bucket}/{model_key}")
+
+
+from sagemaker import image_uris
+
+region = boto3.Session().region_name
+image_uri = image_uris.retrieve("xgboost", region, version="1.5-1")
+
+sm.create_model(
+    ModelName=model_name,
+    PrimaryContainer={
+        "Image": image_uri,
+        "ModelDataUrl": f"s3://{bucket}/{model_key}"
+    },
+    ExecutionRoleArn=role
+)
+
+print("Model created.")
+
+
+sm.create_endpoint_config(
+    EndpointConfigName=endpoint_config_name,
+    ProductionVariants=[
+        {
+            "VariantName": "AllTraffic",
+            "ModelName": model_name,
+            "InitialInstanceCount": 1,
+            "InstanceType": "ml.m5.large"
+        }
+    ]
+)
+
+print("Endpoint config created.")
+
+
+sm.create_endpoint(
+    EndpointName=endpoint_name,
+    EndpointConfigName=endpoint_config_name
+)
+
+print("Creating endpoint…")
