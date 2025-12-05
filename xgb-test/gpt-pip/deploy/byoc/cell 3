@@ -1,3 +1,4 @@
+cat > Dockerfile << 'EOF'
 FROM python:3.10-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -20,3 +21,4 @@ WORKDIR /opt/program
 COPY server.py /opt/program/server.py
 
 CMD ["gunicorn", "--workers", "1", "--bind", "0.0.0.0:8080", "server:app"]
+EOF

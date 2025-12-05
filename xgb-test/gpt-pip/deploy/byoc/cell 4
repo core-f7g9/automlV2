@@ -1,3 +1,4 @@
+cat > server.py << 'EOF'
 import os
 import json
 import logging
@@ -173,3 +174,4 @@ def invocations():
         results.append({"prediction": label, "probabilities": p.tolist()})
 
     return jsonify({"target": target, "predictions": results})
+EOF
