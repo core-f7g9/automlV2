@@ -1,0 +1,28 @@
+import json, boto3
+
+region = region if "region" in globals() else boto3.Session().region_name
+runtime = boto3.client("sagemaker-runtime", region_name=region)
+
+# Same naming as in deploy cell
+PROJECT_PREFIX = PROJECT_PREFIX if "PROJECT_PREFIX" in globals() else "multi-target-xgb"
+endpoint_name = f"{PROJECT_PREFIX}-custom-endpoint"
+
+# Example payload – adjust fields to match your real data
+payload = {
+    "target": "DepartmentCode",   # or AccountCode, SubAccountCode, LocationCode
+    "instances": [
+        {
+            "VendorName": "ACME SUPPLIES INC",
+            "LineDescription": "Office chairs and desks",
+            "ClubNumber": 123,
+        }
+    ]
+}
+
+response = runtime.invoke_endpoint(
+    EndpointName=endpoint_name,
+    ContentType="application/json",
+    Body=json.dumps(payload),
+)
+
+print(json.loads(response["Body"].read().decode("utf-8")))
