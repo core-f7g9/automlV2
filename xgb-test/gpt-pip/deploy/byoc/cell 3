@@ -22,6 +22,8 @@ COPY server.py /opt/program/server.py
 
 EXPOSE 8080
 
-# Just run Flask app directly
-CMD ["python", "server.py"]
+# SageMaker will run: docker run image serve
+# ENTRYPOINT stays, CMD becomes extra arg to python
+ENTRYPOINT ["python", "server.py"]
+CMD ["serve"]
 EOF
