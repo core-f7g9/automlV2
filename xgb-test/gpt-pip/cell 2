@@ -11,6 +11,41 @@ from sklearn.preprocessing import LabelEncoder
 from scipy import sparse
 from sklearn.datasets import dump_svmlight_file
 
+# -----------------------------
+# Helpers
+# -----------------------------
+
+def valid_target_mask(series):
+    """
+    Return a boolean mask where the target value is considered *valid*.
+
+    Treated as MISSING (invalid for supervised training):
+      - NaN / None
+      - empty string ""
+      - "0", "0.0"
+      - textual placeholders: "nan", "NaN", "none", "None"
+      - "null", "NULL"
+      - whitespace-only values
+    """
+
+    s = series
+    s_str = s.astype(str).str.strip()
+
+    missing_values = {
+        "", "0", "0.0",
+        "nan", "NaN",
+        "none", "None",
+        "null", "NULL"
+    }
+
+    missing = s.isna() | s_str.isin(missing_values)
+
+    return ~missing  # True where target is real, not missing
+
+
+# -----------------------------
+# Argparse
+# -----------------------------
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--input_dir")
@@ -36,6 +71,8 @@ if not csv_files:
 
 df = pd.read_csv(csv_files[0])
 
+print(f"[preprocess] Loaded {csv_files[0]} with {len(df)} rows")
+
 # -----------------------------
 # Validate columns
 # -----------------------------
@@ -43,13 +80,11 @@ missing = [c for c in input_features + targets if c not in df.columns]
 if missing:
     raise ValueError(f"Missing required columns: {missing}")
 
-
 # -----------------------------
 # Build sparse feature blocks
 # -----------------------------
 feature_blocks = []
 feature_pipeline = []
-encoders = {}
 
 for feat in input_features:
     col = df[feat]
@@ -60,6 +95,7 @@ for feat in input_features:
         "desc" in feat.lower() or
         "line" in feat.lower()
     ):
+        print(f"[features] {feat}: treating as TEXT → HashingVectorizer({hash_dim})")
         vec = HashingVectorizer(
             n_features=hash_dim,
             alternate_sign=False,
@@ -77,11 +113,10 @@ for feat in input_features:
 
     # CATEGORICAL → LABELENC
     if col.dtype == object:
+        print(f"[features] {feat}: treating as CATEGORICAL → LabelEncoder")
         enc = LabelEncoder()
         df[feat] = df[feat].fillna("").astype(str)
         encoded = enc.fit_transform(df[feat])
-        encoders[feat] = enc
-
         X = sparse.csr_matrix(encoded.reshape(-1, 1))
         feature_blocks.append(X)
 
@@ -96,6 +131,7 @@ for feat in input_features:
         continue
 
     # NUMERIC
+    print(f"[features] {feat}: treating as NUMERIC")
     y = pd.to_numeric(col.fillna(0), errors="coerce").fillna(0).values.reshape(-1, 1)
     X = sparse.csr_matrix(y)
     feature_blocks.append(X)
@@ -105,33 +141,56 @@ for feat in input_features:
         "type": "numeric"
     })
 
-
 # -----------------------------
 # Merge sparse blocks
 # -----------------------------
-X_full = sparse.hstack(feature_blocks).tocsr()   # <-- stays sparse ALWAYS
-
+print("[features] Merging feature blocks into sparse matrix")
+X_full = sparse.hstack(feature_blocks).tocsr()
 
 # -----------------------------
 # Save metadata
 # -----------------------------
 meta = {"feature_pipeline": feature_pipeline, "targets": targets}
-with open(os.path.join(output_dir, "preprocess_meta.json"), "w") as f:
+meta_path = os.path.join(output_dir, "preprocess_meta.json")
+with open(meta_path, "w") as f:
     json.dump(meta, f, indent=2)
-
+print(f"[meta] Wrote {meta_path}")
 
 # -----------------------------
 # Per-target splitting (STILL SPARSE)
 # -----------------------------
 for tgt in targets:
+    print("-" * 60)
+    print(f"[target] Processing target: {tgt}")
 
-    mask = df[tgt].notna().values
-    y_all = df.loc[mask, tgt].astype(str).values
+    col = df[tgt]
+    mask_valid = valid_target_mask(col)
 
-    X_t = X_full[mask]   # sparse slice, SAFE
+    n_total = len(col)
+    n_valid = int(mask_valid.sum())
+    n_missing = n_total - n_valid
 
+    print(f"[target] Total rows:   {n_total}")
+    print(f"[target] Valid rows:   {n_valid}")
+    print(f"[target] Missing/0s:   {n_missing}")
+
+    if n_valid < 10:
+        print(f"[target] WARNING: only {n_valid} valid rows for {tgt}. "
+              f"Model may be very weak.")
+
+    # Filter to rows with a *real* target
+    y_all = df.loc[mask_valid, tgt].astype(str).values
+    X_t = X_full[mask_valid]
+
+    # 80/20 split
     n = len(y_all)
+    if n == 0:
+        print(f"[target] No valid rows after filtering for {tgt}, skipping.")
+        continue
+
     cut = int(n * 0.8)
+    if cut == 0:
+        cut = max(1, n - 1)  # ensure at least 1 train, 1 val if possible
 
     X_train = X_t[:cut]
     y_train = y_all[:cut]
@@ -139,10 +198,18 @@ for tgt in targets:
     X_val = X_t[cut:]
     y_val = y_all[cut:]
 
+    print(f"[target] Train rows: {len(y_train)}, Val rows: {len(y_val)}")
+
     tgt_dir = os.path.join(output_dir, tgt)
     os.makedirs(tgt_dir, exist_ok=True)
 
-    dump_svmlight_file(X_train, y_train, os.path.join(tgt_dir, "train.libsvm"))
-    dump_svmlight_file(X_val,   y_val,   os.path.join(tgt_dir, "val.libsvm"))
+    train_path = os.path.join(tgt_dir, "train.libsvm")
+    val_path = os.path.join(tgt_dir, "val.libsvm")
 
-print("✅ Preprocess complete — fully sparse, no dense memory usage.")
+    dump_svmlight_file(X_train, y_train, train_path)
+    dump_svmlight_file(X_val,   y_val,   val_path)
+
+    print(f"[target] Wrote {train_path}")
+    print(f"[target] Wrote {val_path}")
+
+print("✅ Preprocess complete — targets now treat 0/blank as missing.")
