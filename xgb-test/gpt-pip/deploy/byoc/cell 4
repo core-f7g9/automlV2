@@ -33,27 +33,27 @@ def load_all_models():
 
         logger.info("Loading target: %s", tgt)
 
-        booster_path = os.path.join(tgt_dir, "xgboost-model")
-        class_map_path = os.path.join(tgt_dir, "code", "class_map.json")
-        meta_path = os.path.join(tgt_dir, "code", "preprocess_meta.json")
+        booster_path   = os.path.join(tgt_dir, "xgboost-model")
+        meta_path      = os.path.join(tgt_dir, "code", "preprocess_meta.json")
+        label_map_path = os.path.join(tgt_dir, "code", "label_map.json")
 
         if not os.path.exists(booster_path):
             logger.warning("Missing xgboost-model for %s; skipping", tgt)
             continue
-        if not os.path.exists(class_map_path):
-            logger.warning("Missing class_map.json for %s; skipping", tgt)
-            continue
         if not os.path.exists(meta_path):
             logger.warning("Missing preprocess_meta.json for %s; skipping", tgt)
+            continue
+        if not os.path.exists(label_map_path):
+            logger.warning("Missing label_map.json for %s; skipping", tgt)
             continue
 
         booster = xgb.Booster()
         booster.load_model(booster_path)
 
-        with open(class_map_path) as f:
-            class_map = json.load(f)
         with open(meta_path) as f:
             meta = json.load(f)
+        with open(label_map_path) as f:
+            label_map = json.load(f)
 
         pipeline = meta["feature_pipeline"]
 
@@ -66,7 +66,7 @@ def load_all_models():
 
         bundles[tgt] = {
             "booster": booster,
-            "class_map": class_map,
+            "label_map": label_map,
             "pipeline": pipeline,
             "encoders": encoders,
         }
@@ -157,31 +157,29 @@ def invocations():
             error=f"Unknown target '{target}'. Available={list(MODEL_BUNDLES.keys())}"
         ), 400
 
-    booster = bundle["booster"]
-    pipeline = bundle["pipeline"]
-    encoders = bundle["encoders"]
-    class_map = bundle["class_map"]
-    inv_map = {v: k for k, v in class_map.items()}
+    booster   = bundle["booster"]
+    pipeline  = bundle["pipeline"]
+    encoders  = bundle["encoders"]
+    label_map = bundle["label_map"]
+
+    # label_map: { "Cash Checking - Operating": 0, ... }
+    # We want inverse: { 0: "Cash Checking - Operating", ... }
+    inv_label_map = {v: k for k, v in label_map.items()}
 
     X = build_features(rows, pipeline, encoders)
     dtest = xgb.DMatrix(X)
-    probs = booster.predict(dtest)
+    probs = booster.predict(dtest)  # (n_samples, num_class)
 
     results = []
     for p in probs:
         idx = int(np.argmax(p))
-        label = inv_map.get(idx, str(idx))
+        label = inv_label_map.get(idx, str(idx))
         results.append({"prediction": label, "probabilities": p.tolist()})
 
     return jsonify({"target": target, "predictions": results})
-EOF
 
-
-
-cat >> server.py << 'EOF'
 
 if __name__ == "__main__":
     # Start Flask server on port 8080 for SageMaker
     app.run(host="0.0.0.0", port=8080, debug=False)
 EOF
-
