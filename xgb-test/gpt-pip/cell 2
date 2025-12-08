@@ -178,30 +178,53 @@ for tgt in targets:
         print(f"[target] WARNING: only {n_valid} valid rows for {tgt}. "
               f"Model may be very weak.")
 
-    # Filter to rows with a *real* target
-    y_all = df.loc[mask_valid, tgt].astype(str).values
+    # Filter to rows with a *real* target (as string)
+    y_all_raw = df.loc[mask_valid, tgt].astype(str).values
     X_t = X_full[mask_valid]
 
-    # 80/20 split
-    n = len(y_all)
+    n = len(y_all_raw)
     if n == 0:
         print(f"[target] No valid rows after filtering for {tgt}, skipping.")
         continue
 
+    # ------------------------------------------------------------------
+    # NEW: Ensure labels are numeric for LIBSVM
+    # ------------------------------------------------------------------
+    tgt_dir = os.path.join(output_dir, tgt)
+    os.makedirs(tgt_dir, exist_ok=True)
+
+    # First try: can we interpret labels as numeric directly?
+    try:
+        y_all_num = pd.to_numeric(y_all_raw, errors="raise").astype(float)
+        label_map = None  # Not needed, labels already numeric
+        print(f"[target] {tgt}: labels are numeric-compatible")
+    except Exception:
+        # Fallback: treat labels as categorical and map to 0..K-1
+        print(f"[target] {tgt}: labels are non-numeric, encoding to integers")
+        unique_labels = sorted(pd.unique(y_all_raw))
+        label_map = {str(lbl): int(i) for i, lbl in enumerate(unique_labels)}
+        y_all_num = np.array([label_map[str(lbl)] for lbl in y_all_raw], dtype=float)
+
+        # Optional but useful: save mapping for this target
+        map_path = os.path.join(tgt_dir, "label_map.json")
+        with open(map_path, "w") as f:
+            json.dump(label_map, f, indent=2)
+        print(f"[target] Saved label_map.json with {len(label_map)} entries to {map_path}")
+
+    # ------------------------------------------------------------------
+    # 80/20 split using numeric labels
+    # ------------------------------------------------------------------
     cut = int(n * 0.8)
     if cut == 0:
         cut = max(1, n - 1)  # ensure at least 1 train, 1 val if possible
 
     X_train = X_t[:cut]
-    y_train = y_all[:cut]
+    y_train = y_all_num[:cut]
 
     X_val = X_t[cut:]
-    y_val = y_all[cut:]
+    y_val = y_all_num[cut:]
 
     print(f"[target] Train rows: {len(y_train)}, Val rows: {len(y_val)}")
-
-    tgt_dir = os.path.join(output_dir, tgt)
-    os.makedirs(tgt_dir, exist_ok=True)
 
     train_path = os.path.join(tgt_dir, "train.libsvm")
     val_path = os.path.join(tgt_dir, "val.libsvm")
@@ -212,4 +235,5 @@ for tgt in targets:
     print(f"[target] Wrote {train_path}")
     print(f"[target] Wrote {val_path}")
 
-print("✅ Preprocess complete — targets now treat 0/blank as missing.")
+print("✅ Preprocess complete — targets now safely numeric for LIBSVM.")
+
