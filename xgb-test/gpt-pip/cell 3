@@ -16,27 +16,17 @@ def main():
     y_train = dtrain.get_label()
     y_val   = dval.get_label()
 
-    all_classes = sorted(set(list(y_train) + list(y_val)))
-    class_map = {str(cls): i for i, cls in enumerate(all_classes)}
-
-    with open(os.path.join(model_dir, "class_map.json"), "w") as f:
-        json.dump(class_map, f, indent=2)
-
-    def encode_labels(dmat):
-        raw = dmat.get_label()
-        mapped = np.array([class_map[str(lbl)] for lbl in raw])
-        dmat.set_label(mapped)
-
-    encode_labels(dtrain)
-    encode_labels(dval)
+    # Labels are already encoded to 0..K-1 in preprocess.py
+    all_labels = np.unique(np.concatenate([y_train, y_val]))
+    num_class = len(all_labels)
 
     params = {
         "objective": "multi:softprob",
-        "num_class": len(class_map),
+        "num_class": int(num_class),
         "eval_metric": ["mlogloss", "merror"],
         "tree_method": "hist",
         "max_depth": 8,
-        "eta": 0.2
+        "eta": 0.2,
     }
 
     booster = xgb.train(

@@ -44,7 +44,7 @@ def main():
     preprocess_artifacts = glob.glob(os.path.join(args.preprocess_dir, "labelenc_*.pkl"))
     meta_file = os.path.join(args.preprocess_dir, "preprocess_meta.json")
     
-    # UPDATED: The inference script location
+    # The inference script location (provided as ProcessingInput)
     inference_script_src = "/opt/ml/processing/code/inference.py"
     
     # Validate that inference script exists
@@ -97,10 +97,10 @@ def main():
             logger.error("Contents of extract_dir: %s", os.listdir(extract_dir))
             continue
 
-        # Find class_map.json
-        class_map_path = os.path.join(extract_dir, "class_map.json")
-        if not os.path.exists(class_map_path):
-            logger.error("class_map.json not found for %s", tgt)
+        # Find label_map.json in preprocess output for this target
+        label_map_src = os.path.join(args.preprocess_dir, tgt, "label_map.json")
+        if not os.path.exists(label_map_src):
+            logger.error("label_map.json not found for %s in %s", tgt, args.preprocess_dir)
             continue
 
         # ---------------------------------------------------------
@@ -119,29 +119,29 @@ def main():
         logger.info("  Copying xgboost-model to root...")
         shutil.copy(booster_path, os.path.join(pkg_root, "xgboost-model"))
 
-        # 2. Copy class_map.json to CODE directory
-        logger.info("  Copying class_map.json to code/...")
-        shutil.copy(class_map_path, os.path.join(code_dir, "class_map.json"))
-
-        # 3. Copy preprocessing metadata to CODE directory
+        # 2. Copy preprocessing metadata to CODE directory
         logger.info("  Copying preprocess_meta.json to code/...")
         shutil.copy(meta_file, os.path.join(code_dir, "preprocess_meta.json"))
 
-        # 4. Copy label encoders to CODE directory
+        # 3. Copy label encoders to CODE directory
         logger.info("  Copying %d label encoders to code/...", len(preprocess_artifacts))
         for enc in preprocess_artifacts:
             shutil.copy(enc, code_dir)
+
+        # 4. Copy label_map.json to CODE directory (for decoding predictions)
+        logger.info("  Copying label_map.json for %s", tgt)
+        shutil.copy(label_map_src, os.path.join(code_dir, "label_map.json"))
 
         # 5. Copy Inference Script to CODE directory
         logger.info("  Copying inference.py to code/...")
         shutil.copy(inference_script_src, os.path.join(code_dir, "inference.py"))
 
-        # 6. Create requirements.txt in CODE directory ⭐ UPDATED REQUIREMENTS
+        # 6. Create requirements.txt in CODE directory
         logger.info("  Creating requirements.txt in code/...")
         with open(os.path.join(code_dir, "requirements.txt"), "w") as req:
-            req.write("xgboost\n")  # We need to install XGBoost
-            req.write("joblib\n")   # Safe to include, or rely on base image
-            req.write("scipy\n")    # Safe to include, or rely on base image
+            req.write("xgboost\n")
+            req.write("joblib\n")
+            req.write("scipy\n")
 
         # 7. Verify package structure before taring
         logger.info("  Package structure:")

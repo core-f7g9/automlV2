@@ -46,7 +46,6 @@ def model_fn(model_dir):
     logger.info("✅ Booster loaded successfully")
     
     # 2. Load artifacts from code directory
-    # If this script is running, we are likely INSIDE the code directory or it is adjacent
     code_dir = os.path.join(model_dir, "code")
     
     # Fallback: if we can't find code dir via model_dir, assume we are inside it
@@ -54,10 +53,10 @@ def model_fn(model_dir):
         logger.info("code directory not found at root, assuming current directory contains artifacts")
         code_dir = current_path
 
-    # Load class map
-    class_map_path = os.path.join(code_dir, "class_map.json")
-    with open(class_map_path, "r") as f:
-        class_map = json.load(f)
+    # Load label_map (target index -> original label mapping source)
+    label_map_path = os.path.join(code_dir, "label_map.json")
+    with open(label_map_path, "r") as f:
+        label_map = json.load(f)
 
     # Load metadata
     meta_path = os.path.join(code_dir, "preprocess_meta.json")
@@ -77,7 +76,7 @@ def model_fn(model_dir):
 
     return {
         "model": booster,
-        "class_map": class_map,
+        "label_map": label_map,
         "pipeline": pipeline,
         "encoders": encoders
     }
@@ -95,7 +94,11 @@ def predict_fn(data, artifacts):
     booster = artifacts["model"]
     pipeline = artifacts["pipeline"]
     encoders = artifacts["encoders"]
-    class_map = artifacts["class_map"]
+    label_map = artifacts["label_map"]
+
+    # label_map: { "Cash Checking - Operating": 0, ... }
+    # We want inverse: { 0: "Cash Checking - Operating", ... }
+    inv_label_map = {v: k for k, v in label_map.items()}
 
     if isinstance(data, dict):
         data = [data]
@@ -123,13 +126,13 @@ def predict_fn(data, artifacts):
                 if enc:
                     try:
                         val = enc.transform([str(raw)])[0]
-                    except:
+                    except Exception:
                         val = 0
                 features.append(np.array([val]))
             else:
                 try:
                     val = float(raw)
-                except:
+                except Exception:
                     val = 0.0
                 features.append(np.array([val]))
 
@@ -140,18 +143,18 @@ def predict_fn(data, artifacts):
     dtest = xgb.DMatrix(X)
     probs_batch = booster.predict(dtest)
     
-    inv_map = {v: k for k, v in class_map.items()}
     results = []
     
     # Handle both binary (1D array) and multi-class (2D array) outputs
     if len(probs_batch.shape) == 1:
         # If binary, xgboost often outputs probability of class 1
-        # You might need logic here depending on your objective
-        pass 
+        # You might need logic here depending on your objective.
+        # For now, keep raw prob and map 0/1 via argmax.
+        probs_batch = np.vstack([1 - probs_batch, probs_batch]).T
         
     for probs in probs_batch:
         idx = int(np.argmax(probs))
-        pred_label = inv_map.get(idx, str(idx))
+        pred_label = inv_label_map.get(idx, str(idx))
         results.append({
             "prediction": pred_label,
             "probabilities": probs.tolist()
