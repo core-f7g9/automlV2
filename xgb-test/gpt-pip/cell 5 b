@@ -1,0 +1,58 @@
+%%writefile combine_models.py
+import os, tarfile, tempfile, glob, json
+import boto3
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mme_input")
+    parser.add_argument("--output_dir")
+    parser.add_argument("--bucket")
+    parser.add_argument("--combined_prefix")
+    args = parser.parse_args()
+
+    s3 = boto3.client("s3")
+
+    tmp_root = tempfile.mkdtemp()
+    models_dir = os.path.join(tmp_root, "models")
+    os.makedirs(models_dir, exist_ok=True)
+
+    # List all per-target .tar.gz
+    paginator = s3.get_paginator("list_objects_v2")
+    page_iter = paginator.paginate(
+        Bucket=args.bucket,
+        Prefix=args.mme_input
+    )
+
+    tars = []
+    for page in page_iter:
+        for obj in page.get("Contents", []):
+            if obj["Key"].endswith(".tar.gz"):
+                tars.append(obj["Key"])
+
+    if not tars:
+        raise RuntimeError("No model tars found")
+
+    print("Found model tars:", tars)
+
+    # Extract each into /models/<target>/
+    for key in tars:
+        tgt = os.path.splitext(os.path.basename(key))[0]
+        tgt_dir = os.path.join(models_dir, tgt)
+        os.makedirs(tgt_dir, exist_ok=True)
+
+        local_tar = os.path.join(tmp_root, os.path.basename(key))
+        s3.download_file(args.bucket, key, local_tar)
+
+        with tarfile.open(local_tar, "r:gz") as tar:
+            tar.extractall(tgt_dir)
+
+    # Create combined tar
+    out_tar = os.path.join(args.output_dir, "model.tar.gz")
+    with tarfile.open(out_tar, "w:gz") as tar:
+        tar.add(models_dir, arcname="models")
+
+    print("Combined model stored:", out_tar)
+
+if __name__ == "__main__":
+    main()

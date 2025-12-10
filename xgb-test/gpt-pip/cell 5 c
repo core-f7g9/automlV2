@@ -1,0 +1,58 @@
+%%writefile evaluate.py
+import os, json, tarfile
+import argparse
+import numpy as np
+import xgboost as xgb
+
+def evaluate_model(model_root, val_path):
+    dval = xgb.DMatrix(val_path)
+    preds = model_root.predict(dval)
+    labels = dval.get_label()
+    pred_classes = np.argmax(preds, axis=1)
+    accuracy = (pred_classes == labels).mean()
+    return float(accuracy)
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--preprocess_dir")
+    parser.add_argument("--models_dir")
+    parser.add_argument("--output_dir")
+    parser.add_argument("--targets")
+    args = parser.parse_args()
+
+    targets = json.loads(args.targets)
+    results = {}
+
+    for tgt in targets:
+        tgt_dir = os.path.join(args.models_dir, tgt, "output")
+        model_tar = os.path.join(tgt_dir, "model.tar.gz")
+        if not os.path.exists(model_tar):
+            print(f"Missing model for {tgt}")
+            continue
+
+        extract_dir = os.path.join(args.output_dir, f"extract_{tgt}")
+        os.makedirs(extract_dir, exist_ok=True)
+        with tarfile.open(model_tar, "r:gz") as tar:
+            tar.extractall(extract_dir)
+
+        model_path = os.path.join(extract_dir, "xgboost-model")
+        booster = xgb.Booster()
+        booster.load_model(model_path)
+
+        # Validation path
+        val_path = os.path.join(
+            args.preprocess_dir, tgt, "val.libsvm"
+        )
+
+        acc = evaluate_model(booster, val_path)
+        results[tgt] = {"accuracy": acc}
+
+    # Write evaluation.json
+    out_path = os.path.join(args.output_dir, "evaluation.json")
+    with open(out_path, "w") as f:
+        json.dump(results, f, indent=2)
+
+    print("Evaluation results:", results)
+
+if __name__ == "__main__":
+    main()

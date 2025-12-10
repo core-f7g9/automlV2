@@ -1,0 +1,40 @@
+%%writefile update_endpoint.py
+import boto3
+import json
+
+def lambda_handler(event, context):
+    """
+    Updates the endpoint to use the latest EndpointConfig.
+    If the endpoint does not exist, it creates it.
+    """
+
+    sm = boto3.client("sagemaker")
+
+    endpoint_name  = event["endpoint_name"]
+    endpoint_config = event["endpoint_config"]
+
+    print(f"[update_endpoint] Endpoint={endpoint_name}")
+    print(f"[update_endpoint] Config={endpoint_config}")
+
+    # Try updating the endpoint
+    try:
+        sm.update_endpoint(
+            EndpointName=endpoint_name,
+            EndpointConfigName=endpoint_config
+        )
+        print(f"[update_endpoint] Updated endpoint: {endpoint_name}")
+        return {"status": "endpoint-updated"}
+    except sm.exceptions.ClientError as e:
+        print(f"[update_endpoint] Update failed, attempting create: {e}")
+
+    # If update failed, endpoint might not exist — create it
+    try:
+        sm.create_endpoint(
+            EndpointName=endpoint_name,
+            EndpointConfigName=endpoint_config
+        )
+        print(f"[update_endpoint] Created endpoint: {endpoint_name}")
+        return {"status": "endpoint-created"}
+    except Exception as e:
+        print(f"[update_endpoint] Create failed: {e}")
+        raise e

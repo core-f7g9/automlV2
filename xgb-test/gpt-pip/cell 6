@@ -1,24 +1,34 @@
-# ============================
-# Cell 6 — FINAL WORKING VERSION
-# (LIBSVM + XGBoost + Dynamic Preprocess Paths + Valid Join)
-# ============================
-
 import os
 import json
 import sagemaker
-from sagemaker.processing import ScriptProcessor, ProcessingInput, ProcessingOutput
-from sagemaker.workflow.steps import ProcessingStep, TrainingStep
-from sagemaker.xgboost.estimator import XGBoost
-from sagemaker.inputs import TrainingInput
-from sagemaker.workflow.pipeline_context import PipelineSession
+import boto3
 from sagemaker.workflow.pipeline import Pipeline
+from sagemaker.workflow.steps import ProcessingStep, TrainingStep, LambdaStep
+from sagemaker.workflow.step_collections import RegisterModel
+from sagemaker.workflow.lambda_step import LambdaStep
+from sagemaker.processing import ScriptProcessor, ProcessingInput, ProcessingOutput
+from sagemaker.inputs import TrainingInput
 from sagemaker.workflow.functions import Join
+from sagemaker.workflow.conditions import ConditionGreaterThanOrEqualTo
+from sagemaker.workflow.condition_step import ConditionStep
+from sagemaker.lambda_helper import Lambda
+from sagemaker.xgboost.estimator import XGBoost
+from sagemaker.workflow.pipeline_context import PipelineSession
 
+region = boto3.Session().region_name
+sm_sess = sagemaker.Session()
 pipeline_session = PipelineSession()
+role = sagemaker.get_execution_role()
+BUCKET = sm_sess.default_bucket()
 
-# -------------------------------
-# PREPROCESSING STEP
-# -------------------------------
+PROJECT_PREFIX = "multi-target-xgb"
+
+TARGET_COLS = ["DepartmentCode", "AccountCode", "SubAccountCode", "LocationCode"]
+INPUT_FEATURES = ["VendorName", "LineDescription", "ClubNumber"]
+
+# ------------------------------------
+# PREPROCESS STEP
+# ------------------------------------
 processor = ScriptProcessor(
     image_uri=sagemaker.image_uris.retrieve("sklearn", region, version="1.2-1"),
     role=role,
@@ -27,7 +37,7 @@ processor = ScriptProcessor(
     instance_count=1
 )
 
-preprocess_output = f"{PROJECT_NAME}/processing" if "PROJECT_NAME" in globals() else f"{PROJECT_PREFIX}/processing"
+preprocess_output_prefix = f"{PROJECT_PREFIX}/processing"
 
 step_preprocess = ProcessingStep(
     name="PreprocessData",
@@ -35,7 +45,7 @@ step_preprocess = ProcessingStep(
     inputs=[
         ProcessingInput(
             input_name="raw_data",
-            source=INPUT_S3,
+            source=f"s3://{BUCKET}/{PROJECT_PREFIX}/input/data.csv",
             destination="/opt/ml/processing/input"
         )
     ],
@@ -43,7 +53,7 @@ step_preprocess = ProcessingStep(
         ProcessingOutput(
             output_name="proc_output",
             source="/opt/ml/processing/output",
-            destination=f"s3://{BUCKET}/{preprocess_output}"
+            destination=f"s3://{BUCKET}/{preprocess_output_prefix}"
         )
     ],
     code="preprocess.py",
@@ -56,14 +66,15 @@ step_preprocess = ProcessingStep(
     ]
 )
 
-# This is the Pipeline Property for the preprocess output S3 URI
-proc_uri = step_preprocess.properties.ProcessingOutputConfig.Outputs["proc_output"].S3Output.S3Uri
+proc_uri = step_preprocess.properties.ProcessingOutputConfig.Outputs[
+    "proc_output"
+].S3Output.S3Uri
 
-# -------------------------------
-# TRAINING STEPS (LIBSVM + XGBoost)
-# -------------------------------
-models_output = f"{PROJECT_NAME}/trained-models" if "PROJECT_NAME" in globals() else f"{PROJECT_PREFIX}/trained-models"
+# ------------------------------------
+# TRAINING STEPS (4 models)
+# ------------------------------------
 train_steps = {}
+models_output_prefix = f"{PROJECT_PREFIX}/trained-models"
 
 for tgt in TARGET_COLS:
 
@@ -73,48 +84,28 @@ for tgt in TARGET_COLS:
         instance_type="ml.m5.xlarge",
         instance_count=1,
         role=role,
-        output_path=f"s3://{BUCKET}/{models_output}/{tgt}",
+        output_path=f"s3://{BUCKET}/{models_output_prefix}/{tgt}",
         base_job_name=f"xgb-{tgt}"
     )
 
-    # --------------------------
-    # ⭐ FIXED: Valid S3 paths using Join()
-    # No Python string ops, no rstrip(), fully Pipeline-safe
-    # --------------------------
-    train_path = Join(
-        on="/",
-        values=[proc_uri, tgt, "train.libsvm"]
-    )
+    train_path = Join(on="/", values=[proc_uri, tgt, "train.libsvm"])
+    val_path = Join(on="/", values=[proc_uri, tgt, "val.libsvm"])
 
-    val_path = Join(
-        on="/",
-        values=[proc_uri, tgt, "val.libsvm"]
-    )
-
-    # --------------------------
-    # TRAIN — MUST use "train" and "validation" channels
-    # --------------------------
     step_train = TrainingStep(
         name=f"Train_{tgt}",
         estimator=estimator,
         inputs={
-            "train": TrainingInput(
-                s3_data=train_path,
-                content_type="text/libsvm"
-            ),
-            "validation": TrainingInput(
-                s3_data=val_path,
-                content_type="text/libsvm"
-            )
+            "train": TrainingInput(s3_data=train_path, content_type="text/libsvm"),
+            "validation": TrainingInput(s3_data=val_path, content_type="text/libsvm")
         }
     )
 
     train_steps[tgt] = step_train
 
-# -------------------------------
-# REPACK STEP (fixed)
-# -------------------------------
-mme_output = f"{PROJECT_NAME}/mme-packaged" if "PROJECT_NAME" in globals() else f"{PROJECT_PREFIX}/mme-packaged"
+# ------------------------------------
+# REPACK STEP
+# ------------------------------------
+mme_output_prefix = f"{PROJECT_PREFIX}/mme-packaged"
 
 repack_processor = ScriptProcessor(
     image_uri=sagemaker.image_uris.retrieve("sklearn", region, version="1.2-1"),
@@ -130,12 +121,12 @@ step_repack = ProcessingStep(
     inputs=[
         ProcessingInput(
             input_name="models_dir",
-            source=f"s3://{BUCKET}/{models_output}",
+            source=f"s3://{BUCKET}/{models_output_prefix}",
             destination="/opt/ml/processing/models"
         ),
         ProcessingInput(
             input_name="preprocess_dir",
-            source=proc_uri,                      # the preprocess output
+            source=proc_uri,
             destination="/opt/ml/processing/preprocess"
         ),
         ProcessingInput(
@@ -148,26 +139,196 @@ step_repack = ProcessingStep(
         ProcessingOutput(
             output_name="mme_models",
             source="/opt/ml/processing/output",
-            destination=f"s3://{BUCKET}/{mme_output}"
+            destination=f"s3://{BUCKET}/{mme_output_prefix}"
         )
     ],
     code="repack_for_mme.py",
-    job_arguments=[
-        "--models_dir", "/opt/ml/processing/models",
-        "--preprocess_dir", "/opt/ml/processing/preprocess",
-        "--output_dir", "/opt/ml/processing/output"
-    ],
     depends_on=list(train_steps.values())
 )
 
-# -------------------------------
-# PIPELINE DEFINITION
-# -------------------------------
+# ------------------------------------
+# COMBINE MODELS STEP
+# ------------------------------------
+combine_processor = ScriptProcessor(
+    image_uri=sagemaker.image_uris.retrieve("sklearn", region, version="1.2-1"),
+    role=role,
+    command=["python3"],
+    instance_type="ml.m5.xlarge",
+    instance_count=1
+)
+
+combined_prefix = f"{PROJECT_PREFIX}/combined"
+
+step_combine = ProcessingStep(
+    name="CombineModels",
+    processor=combine_processor,
+    inputs=[
+        ProcessingInput(
+            input_name="mme_input",
+            source=f"s3://{BUCKET}/{mme_output_prefix}",
+            destination="/opt/ml/processing/mme"
+        )
+    ],
+    outputs=[
+        ProcessingOutput(
+            output_name="combined",
+            source="/opt/ml/processing/output",
+            destination=f"s3://{BUCKET}/{combined_prefix}"
+        )
+    ],
+    code="combine_models.py",
+    job_arguments=[
+        "--mme_input", f"s3://{BUCKET}/{mme_output_prefix}",
+        "--bucket", BUCKET,
+        "--combined_prefix", combined_prefix,
+        "--output_dir", "/opt/ml/processing/output"
+    ]
+)
+
+combined_model_uri = step_combine.properties.ProcessingOutputConfig.Outputs[
+    "combined"
+].S3Output.S3Uri
+
+# ------------------------------------
+# EVALUATION STEP
+# ------------------------------------
+eval_processor = ScriptProcessor(
+    image_uri=sagemaker.image_uris.retrieve("xgboost", region, version="1.5-1"),
+    role=role,
+    command=["python3"],
+    instance_type="ml.m5.xlarge",
+    instance_count=1
+)
+
+eval_prefix = f"{PROJECT_PREFIX}/evaluation"
+
+step_evaluate = ProcessingStep(
+    name="EvaluateModel",
+    processor=eval_processor,
+    inputs=[
+        ProcessingInput(
+            input_name="preprocess_dir",
+            source=proc_uri,
+            destination="/opt/ml/processing/pre"
+        ),
+        ProcessingInput(
+            input_name="models_dir",
+            source=f"s3://{BUCKET}/{models_output_prefix}",
+            destination="/opt/ml/processing/models"
+        )
+    ],
+    outputs=[
+        ProcessingOutput(
+            output_name="evaluation",
+            source="/opt/ml/processing/output",
+            destination=f"s3://{BUCKET}/{eval_prefix}"
+        )
+    ],
+    code="evaluate.py",
+    job_arguments=[
+        "--preprocess_dir", "/opt/ml/processing/pre",
+        "--models_dir", "/opt/ml/processing/models",
+        "--targets", json.dumps(TARGET_COLS),
+        "--output_dir", "/opt/ml/processing/output"
+    ]
+)
+
+# ------------------------------------
+# REGISTER MODEL
+# ------------------------------------
+step_register = RegisterModel(
+    name="RegisterCustomModel",
+    model_data=combined_model_uri,
+    image_uri="<YOUR_ECR_CUSTOM_IMAGE>",
+    model_package_group_name="MultiTargetXGB-Custom",
+    approval_status="PendingManualApproval",
+    role=role,
+)
+
+# ------------------------------------
+# CONDITION STEP: Only deploy if accuracy >= 0.10
+# ------------------------------------
+cond = ConditionGreaterThanOrEqualTo(
+    left=step_evaluate.properties.ProcessingOutputConfig.Outputs[
+        "evaluation"
+    ].S3Output.S3Uri,  # will parse inside lambda
+    right=0.10
+)
+
+# ------------------------------------
+# LAMBDA STEPS
+# ------------------------------------
+lambda_create = Lambda(
+    function_name="lambda-create-model",
+    session=pipeline_session
+)
+
+step_lambda_create = LambdaStep(
+    name="CreateModel",
+    lambda_func=lambda_create,
+    inputs={
+        "model_name": "multi-target-xgb-custom-model",
+        "image_uri": "<YOUR_ECR_CUSTOM_IMAGE>",
+        "model_data": combined_model_uri,
+        "role": role
+    }
+)
+
+lambda_config = Lambda(
+    function_name="lambda-update-config",
+    session=pipeline_session
+)
+
+step_lambda_config = LambdaStep(
+    name="UpdateConfig",
+    lambda_func=lambda_config,
+    inputs={
+        "endpoint_config": "multi-target-xgb-config",
+        "model_name": "multi-target-xgb-custom-model",
+        "instance_type": "ml.m5.xlarge"
+    }
+)
+
+lambda_update = Lambda(
+    function_name="lambda-update-endpoint",
+    session=pipeline_session
+)
+
+step_lambda_update = LambdaStep(
+    name="UpdateEndpoint",
+    lambda_func=lambda_update,
+    inputs={
+        "endpoint_name": "multi-target-xgb-custom-endpoint",
+        "endpoint_config": "multi-target-xgb-config"
+    }
+)
+
+# ------------------------------------
+# CONDITION: Only deploy if model is good
+# ------------------------------------
+step_condition = ConditionStep(
+    name="CheckAccuracy",
+    conditions=[cond],
+    if_steps=[step_lambda_create, step_lambda_config, step_lambda_update],
+    else_steps=[]
+)
+
+# ------------------------------------
+# FINAL PIPELINE
+# ------------------------------------
 pipeline = Pipeline(
-    name="MultiTargetXGBPipeline-LIBSVM",
-    steps=[step_preprocess] + list(train_steps.values()) + [step_repack],
+    name="MultiTargetXGB-CustomContainer-Pipeline",
+    steps=[
+        step_preprocess,
+        *train_steps.values(),
+        step_repack,
+        step_combine,
+        step_evaluate,
+        step_register,
+        step_condition
+    ],
     sagemaker_session=pipeline_session
 )
 
 pipeline.upsert(role_arn=role)
-print("🎉 FINAL PIPELINE CREATED SUCCESSFULLY!")
+print("PIPELINE READY.")

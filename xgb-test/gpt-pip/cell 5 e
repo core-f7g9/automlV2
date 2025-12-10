@@ -1,0 +1,40 @@
+%%writefile update_config.py
+import boto3
+import json
+
+def lambda_handler(event, context):
+    """
+    Creates (or replaces) the EndpointConfig for your custom container.
+    """
+
+    sm = boto3.client("sagemaker")
+
+    endpoint_config = event["endpoint_config"]
+    model_name      = event["model_name"]
+    instance_type   = event["instance_type"]
+
+    print(f"[update_config] EndpointConfig={endpoint_config}")
+    print(f"[update_config] ModelName={model_name}")
+
+    # Delete previous config if exists
+    try:
+        sm.delete_endpoint_config(EndpointConfigName=endpoint_config)
+        print(f"[update_config] Deleted old config: {endpoint_config}")
+    except Exception as e:
+        print(f"[update_config] No existing config to delete: {e}")
+
+    # Create new endpoint config
+    sm.create_endpoint_config(
+        EndpointConfigName=endpoint_config,
+        ProductionVariants=[
+            {
+                "VariantName": "AllTraffic",
+                "ModelName": model_name,
+                "InstanceType": instance_type,
+                "InitialInstanceCount": 1
+            }
+        ]
+    )
+
+    print(f"[update_config] Created new endpoint config: {endpoint_config}")
+    return {"status": "config-updated", "endpoint_config": endpoint_config}
