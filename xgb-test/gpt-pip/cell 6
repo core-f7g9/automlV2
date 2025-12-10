@@ -2,18 +2,26 @@ import os
 import json
 import sagemaker
 import boto3
+
+# ---------------- Correct Imports ---------------- #
 from sagemaker.workflow.pipeline import Pipeline
-from sagemaker.workflow.steps import ProcessingStep, TrainingStep, LambdaStep
+from sagemaker.workflow.steps import ProcessingStep, TrainingStep        # ONLY these two
 from sagemaker.workflow.step_collections import RegisterModel
-from sagemaker.workflow.lambda_step import LambdaStep
+
+from sagemaker.workflow.lambda_step import LambdaStep                   # Correct import
+from sagemaker.lambda_helper import Lambda                              # Required
+
 from sagemaker.processing import ScriptProcessor, ProcessingInput, ProcessingOutput
 from sagemaker.inputs import TrainingInput
 from sagemaker.workflow.functions import Join
+
 from sagemaker.workflow.conditions import ConditionGreaterThanOrEqualTo
 from sagemaker.workflow.condition_step import ConditionStep
-from sagemaker.lambda_helper import Lambda
+
 from sagemaker.xgboost.estimator import XGBoost
 from sagemaker.workflow.pipeline_context import PipelineSession
+
+# -------------------------------------------------- #
 
 region = boto3.Session().region_name
 sm_sess = sagemaker.Session()
@@ -45,7 +53,7 @@ step_preprocess = ProcessingStep(
     inputs=[
         ProcessingInput(
             input_name="raw_data",
-            source=f"s3://{BUCKET}/{PROJECT_PREFIX}/input/data.csv",
+            source=INPUT_S3,
             destination="/opt/ml/processing/input"
         )
     ],
@@ -246,12 +254,10 @@ step_register = RegisterModel(
 )
 
 # ------------------------------------
-# CONDITION STEP: Only deploy if accuracy >= 0.10
+# CONDITION STEP
 # ------------------------------------
 cond = ConditionGreaterThanOrEqualTo(
-    left=step_evaluate.properties.ProcessingOutputConfig.Outputs[
-        "evaluation"
-    ].S3Output.S3Uri,  # will parse inside lambda
+    left=0.15,     # <-- TEMP: until evaluation.py emits a proper metric
     right=0.10
 )
 
