@@ -288,6 +288,9 @@ INSTANCE_TYPE = "ml.m5.xlarge"
 INSTANCE_COUNT = 1
 CUSTOM_IMAGE_URI = "<YOUR_ECR_CUSTOM_IMAGE>"  # TODO: replace
 
+# Sanity check in the notebook BEFORE creating the step:
+print("Notebook role value (should be an ARN string):", role, type(role))
+
 deploy_processor = ScriptProcessor(
     image_uri=sagemaker.image_uris.retrieve("sklearn", region, version="1.2-1"),
     role=role,
@@ -300,8 +303,8 @@ step_deploy = ProcessingStep(
     name="DeployEndpoint",
     processor=deploy_processor,
     code="deploy_endpoint.py",
-    inputs=[],   # no S3 inputs needed
-    outputs=[],  # no outputs; just side-effect: model + endpoint
+    inputs=[],
+    outputs=[],
     job_arguments=[
         "--model_name", MODEL_NAME,
         "--endpoint_config_name", ENDPOINT_CONFIG_NAME,
@@ -310,8 +313,9 @@ step_deploy = ProcessingStep(
         "--model_data", combined_model_uri,
         "--instance_type", INSTANCE_TYPE,
         "--instance_count", str(INSTANCE_COUNT),
+        "--role_arn", role,   # pass IAM role ARN directly
     ],
-    depends_on=[step_evaluate],  # ensure evaluation finishes before deploy
+    depends_on=[step_evaluate],  # ensure evaluation completes before deploy
 )
 
 # -------------------------------
