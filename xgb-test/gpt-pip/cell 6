@@ -8,9 +8,6 @@ from sagemaker.workflow.pipeline import Pipeline
 from sagemaker.workflow.steps import ProcessingStep, TrainingStep
 from sagemaker.workflow.step_collections import RegisterModel
 
-from sagemaker.workflow.lambda_step import LambdaStep
-from sagemaker.lambda_helper import Lambda
-
 from sagemaker.processing import ScriptProcessor, ProcessingInput, ProcessingOutput
 from sagemaker.inputs import TrainingInput
 from sagemaker.workflow.functions import Join
@@ -21,10 +18,14 @@ from sagemaker.workflow.condition_step import ConditionStep
 from sagemaker.xgboost.estimator import XGBoost
 from sagemaker.workflow.pipeline_context import PipelineSession
 
+# NEW: Import for ModelStep approach
+from sagemaker.workflow.model_step import ModelStep
+from sagemaker.model import Model
+
 # -------------------------------------------------- #
 
 region = boto3.Session().region_name
-sm_sess = sagemaker.Session()          # regular session (used for Lambda helper)
+sm_sess = sagemaker.Session()          # regular session
 pipeline_session = PipelineSession()   # MUST be used for all pipeline-bound jobs
 role = sagemaker.get_execution_role()
 BUCKET = sm_sess.default_bucket()
@@ -291,71 +292,52 @@ cond = ConditionGreaterThanOrEqualTo(
 )
 
 # ------------------------------------
-# LAMBDA STEPS (created from local scripts)
+# MODEL DEPLOYMENT STEPS (REPLACED LAMBDA WITH MODELSTEP)
 # ------------------------------------
-lambda_role_arn = role  # can be swapped for a dedicated Lambda role later
 
-# Lambda: create_model.py
-lambda_create = Lambda(
-    function_name="multi-target-xgb-create-model",
-    execution_role_arn=lambda_role_arn,
-    script="create_model.py",
-    handler="create_model.lambda_handler",
-    timeout=300,
-    memory_size=512,
-    session=pipeline_session,   # Changed from sm_sess to pipeline_session
+# Create a Model object for deployment
+custom_model = Model(
+    image_uri="<YOUR_ECR_CUSTOM_IMAGE>",  # Replace with your actual ECR image URI
+    model_data=combined_model_uri,
+    role=role,
+    sagemaker_session=pipeline_session,
 )
 
-step_lambda_create = LambdaStep(
+# ModelStep to create the model
+step_create_model = ModelStep(
     name="CreateModel",
-    lambda_func=lambda_create,
-    inputs={
-        "model_name": "multi-target-xgb-custom-model",
-        "image_uri": "<YOUR_ECR_CUSTOM_IMAGE>",
-        "model_data": combined_model_uri,
-        "role": role
-    }
+    step_args=custom_model.create(
+        instance_type="ml.m5.xlarge",
+    ),
 )
 
-# Lambda: update_config.py
-lambda_config = Lambda(
-    function_name="multi-target-xgb-update-config",
-    execution_role_arn=lambda_role_arn,
-    script="update_config.py",
-    handler="update_config.lambda_handler",
-    timeout=300,
-    memory_size=512,
-    session=pipeline_session,   # Changed from sm_sess to pipeline_session
+# Note: For endpoint creation/update, you have two options:
+# Option A: Handle endpoint deployment outside the pipeline (manually or via separate script)
+# Option B: Use a custom processing step that calls boto3 to create/update endpoint
+
+# OPTION B: Processing step for endpoint deployment
+endpoint_processor = ScriptProcessor(
+    image_uri=sagemaker.image_uris.retrieve("sklearn", region, version="1.2-1"),
+    role=role,
+    command=["python3"],
+    instance_type="ml.m5.xlarge",
+    instance_count=1,
+    sagemaker_session=pipeline_session,
 )
 
-step_lambda_config = LambdaStep(
-    name="UpdateConfig",
-    lambda_func=lambda_config,
-    inputs={
-        "endpoint_config": "multi-target-xgb-config",
-        "model_name": "multi-target-xgb-custom-model",
-        "instance_type": "ml.m5.xlarge"
-    }
-)
-
-# Lambda: update_endpoint.py
-lambda_update = Lambda(
-    function_name="multi-target-xgb-update-endpoint",
-    execution_role_arn=lambda_role_arn,
-    script="update_endpoint.py",
-    handler="update_endpoint.lambda_handler",
-    timeout=300,
-    memory_size=512,
-    session=pipeline_session,   # Changed from sm_sess to pipeline_session
-)
-
-step_lambda_update = LambdaStep(
-    name="UpdateEndpoint",
-    lambda_func=lambda_update,
-    inputs={
-        "endpoint_name": "multi-target-xgb-custom-endpoint",
-        "endpoint_config": "multi-target-xgb-config"
-    }
+# You'll need to create this script
+step_deploy_endpoint = ProcessingStep(
+    name="DeployEndpoint",
+    processor=endpoint_processor,
+    code="deploy_endpoint.py",  # Create this script (shown below)
+    job_arguments=[
+        "--model-name", custom_model.name,
+        "--endpoint-name", "multi-target-xgb-custom-endpoint",
+        "--endpoint-config", "multi-target-xgb-config",
+        "--instance-type", "ml.m5.xlarge",
+        "--region", region,
+        "--role", role,
+    ],
 )
 
 # ------------------------------------
@@ -364,7 +346,7 @@ step_lambda_update = LambdaStep(
 step_condition = ConditionStep(
     name="CheckAccuracy",
     conditions=[cond],
-    if_steps=[step_lambda_create, step_lambda_config, step_lambda_update],
+    if_steps=[step_create_model, step_deploy_endpoint],
     else_steps=[],
 )
 
