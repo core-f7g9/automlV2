@@ -30,16 +30,14 @@ def safe_delete_model(sm, model_name: str):
 
 
 def main():
-    # REQUIRED FIX -----------------------------------------
+    # Region fix
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
     if not region:
-        raise ValueError("AWS_REGION not set in environment!")
+        raise ValueError("AWS_REGION / AWS_DEFAULT_REGION not set in environment")
 
     print("[deploy] Using region:", region)
 
     sm = boto3.client("sagemaker", region_name=region)
-    sts = boto3.client("sts", region_name=region)
-    # --------------------------------------------------------
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name")
@@ -49,6 +47,7 @@ def main():
     parser.add_argument("--model_data")
     parser.add_argument("--instance_type")
     parser.add_argument("--instance_count", type=int, default=1)
+    parser.add_argument("--role_arn")  # NEW
     args = parser.parse_args()
 
     print("[deploy] Args:", args)
@@ -58,9 +57,7 @@ def main():
     safe_delete_endpoint_config(sm, args.endpoint_config_name)
     safe_delete_model(sm, args.model_name)
 
-    role_arn = sts.get_caller_identity()["Arn"].rsplit("/", 1)[0]
-
-    # 2) Create new model
+    # 2) Create new model with the IAM role ARN passed from pipeline
     print("[deploy] Creating model...")
     sm.create_model(
         ModelName=args.model_name,
@@ -68,7 +65,7 @@ def main():
             "Image": args.image_uri,
             "ModelDataUrl": args.model_data,
         },
-        ExecutionRoleArn=role_arn,
+        ExecutionRoleArn=args.role_arn,
     )
     print("[deploy] Created model:", args.model_name)
 
