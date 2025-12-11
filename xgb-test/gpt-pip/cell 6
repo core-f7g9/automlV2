@@ -303,7 +303,7 @@ lambda_create = Lambda(
     handler="create_model.lambda_handler",
     timeout=300,
     memory_size=512,
-    session=sm_sess,   # regular Session is fine for Lambda
+    session=pipeline_session,   # Changed from sm_sess to pipeline_session
 )
 
 step_lambda_create = LambdaStep(
@@ -313,8 +313,8 @@ step_lambda_create = LambdaStep(
         "model_name": "multi-target-xgb-custom-model",
         "image_uri": "<YOUR_ECR_CUSTOM_IMAGE>",
         "model_data": combined_model_uri,
-        "role": role,
-    },
+        "role": role
+    }
 )
 
 # Lambda: update_config.py
@@ -325,7 +325,7 @@ lambda_config = Lambda(
     handler="update_config.lambda_handler",
     timeout=300,
     memory_size=512,
-    session=sm_sess,
+    session=pipeline_session,   # Changed from sm_sess to pipeline_session
 )
 
 step_lambda_config = LambdaStep(
@@ -334,8 +334,8 @@ step_lambda_config = LambdaStep(
     inputs={
         "endpoint_config": "multi-target-xgb-config",
         "model_name": "multi-target-xgb-custom-model",
-        "instance_type": "ml.m5.xlarge",
-    },
+        "instance_type": "ml.m5.xlarge"
+    }
 )
 
 # Lambda: update_endpoint.py
@@ -346,7 +346,7 @@ lambda_update = Lambda(
     handler="update_endpoint.lambda_handler",
     timeout=300,
     memory_size=512,
-    session=sm_sess,
+    session=pipeline_session,   # Changed from sm_sess to pipeline_session
 )
 
 step_lambda_update = LambdaStep(
@@ -354,8 +354,8 @@ step_lambda_update = LambdaStep(
     lambda_func=lambda_update,
     inputs={
         "endpoint_name": "multi-target-xgb-custom-endpoint",
-        "endpoint_config": "multi-target-xgb-config",
-    },
+        "endpoint_config": "multi-target-xgb-config"
+    }
 )
 
 # ------------------------------------
