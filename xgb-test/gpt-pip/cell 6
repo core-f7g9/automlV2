@@ -24,8 +24,8 @@ from sagemaker.workflow.pipeline_context import PipelineSession
 # -------------------------------------------------- #
 
 region = boto3.Session().region_name
-sm_sess = sagemaker.Session()
-pipeline_session = PipelineSession()
+sm_sess = sagemaker.Session()          # regular session (used for Lambda helper)
+pipeline_session = PipelineSession()   # MUST be used for all pipeline-bound jobs
 role = sagemaker.get_execution_role()
 BUCKET = sm_sess.default_bucket()
 
@@ -33,6 +33,9 @@ PROJECT_PREFIX = "multi-target-xgb"
 
 TARGET_COLS = ["DepartmentCode", "AccountCode", "SubAccountCode", "LocationCode"]
 INPUT_FEATURES = ["VendorName", "LineDescription", "ClubNumber"]
+
+# INPUT CSV (already uploaded)
+INPUT_S3 = f"s3://{BUCKET}/{PROJECT_PREFIX}/input/data.csv"
 
 # ------------------------------------
 # PREPROCESS STEP
@@ -42,7 +45,8 @@ processor = ScriptProcessor(
     role=role,
     command=["python3"],
     instance_type="ml.m5.xlarge",
-    instance_count=1
+    instance_count=1,
+    sagemaker_session=pipeline_session,   # IMPORTANT
 )
 
 preprocess_output_prefix = f"{PROJECT_PREFIX}/processing"
@@ -53,25 +57,30 @@ step_preprocess = ProcessingStep(
     inputs=[
         ProcessingInput(
             input_name="raw_data",
-            source=INPUT_S3,  # assumes INPUT_S3 is defined in a previous cell
-            destination="/opt/ml/processing/input"
+            source=INPUT_S3,
+            destination="/opt/ml/processing/input",
         )
     ],
     outputs=[
         ProcessingOutput(
             output_name="proc_output",
             source="/opt/ml/processing/output",
-            destination=f"s3://{BUCKET}/{preprocess_output_prefix}"
+            destination=f"s3://{BUCKET}/{preprocess_output_prefix}",
         )
     ],
     code="preprocess.py",
     job_arguments=[
-        "--input_dir", "/opt/ml/processing/input",
-        "--targets", json.dumps(TARGET_COLS),
-        "--input_features", json.dumps(INPUT_FEATURES),
-        "--output_dir", "/opt/ml/processing/output",
-        "--tfidf_max_features", "2000",
-    ]
+        "--input_dir",
+        "/opt/ml/processing/input",
+        "--targets",
+        json.dumps(TARGET_COLS),
+        "--input_features",
+        json.dumps(INPUT_FEATURES),
+        "--output_dir",
+        "/opt/ml/processing/output",
+        "--tfidf_max_features",
+        "2000",
+    ],
 )
 
 proc_uri = step_preprocess.properties.ProcessingOutputConfig.Outputs[
@@ -93,7 +102,8 @@ for tgt in TARGET_COLS:
         instance_count=1,
         role=role,
         output_path=f"s3://{BUCKET}/{models_output_prefix}/{tgt}",
-        base_job_name=f"xgb-{tgt}"
+        base_job_name=f"xgb-{tgt}",
+        sagemaker_session=pipeline_session,   # IMPORTANT
     )
 
     train_path = Join(on="/", values=[proc_uri, tgt, "train.libsvm"])
@@ -103,9 +113,13 @@ for tgt in TARGET_COLS:
         name=f"Train_{tgt}",
         estimator=estimator,
         inputs={
-            "train": TrainingInput(s3_data=train_path, content_type="text/libsvm"),
-            "validation": TrainingInput(s3_data=val_path, content_type="text/libsvm")
-        }
+            "train": TrainingInput(
+                s3_data=train_path, content_type="text/libsvm"
+            ),
+            "validation": TrainingInput(
+                s3_data=val_path, content_type="text/libsvm"
+            ),
+        },
     )
 
     train_steps[tgt] = step_train
@@ -120,7 +134,8 @@ repack_processor = ScriptProcessor(
     role=role,
     command=["python3"],
     instance_type="ml.m5.xlarge",
-    instance_count=1
+    instance_count=1,
+    sagemaker_session=pipeline_session,   # IMPORTANT
 )
 
 step_repack = ProcessingStep(
@@ -130,28 +145,28 @@ step_repack = ProcessingStep(
         ProcessingInput(
             input_name="models_dir",
             source=f"s3://{BUCKET}/{models_output_prefix}",
-            destination="/opt/ml/processing/models"
+            destination="/opt/ml/processing/models",
         ),
         ProcessingInput(
             input_name="preprocess_dir",
             source=proc_uri,
-            destination="/opt/ml/processing/preprocess"
+            destination="/opt/ml/processing/preprocess",
         ),
         ProcessingInput(
             input_name="inference_script",
             source="inference.py",
-            destination="/opt/ml/processing/code"
-        )
+            destination="/opt/ml/processing/code",
+        ),
     ],
     outputs=[
         ProcessingOutput(
             output_name="mme_models",
             source="/opt/ml/processing/output",
-            destination=f"s3://{BUCKET}/{mme_output_prefix}"
+            destination=f"s3://{BUCKET}/{mme_output_prefix}",
         )
     ],
     code="repack_for_mme.py",
-    depends_on=list(train_steps.values())
+    depends_on=list(train_steps.values()),
 )
 
 # ------------------------------------
@@ -162,7 +177,8 @@ combine_processor = ScriptProcessor(
     role=role,
     command=["python3"],
     instance_type="ml.m5.xlarge",
-    instance_count=1
+    instance_count=1,
+    sagemaker_session=pipeline_session,   # IMPORTANT
 )
 
 combined_prefix = f"{PROJECT_PREFIX}/combined"
@@ -174,23 +190,27 @@ step_combine = ProcessingStep(
         ProcessingInput(
             input_name="mme_input",
             source=f"s3://{BUCKET}/{mme_output_prefix}",
-            destination="/opt/ml/processing/mme"
+            destination="/opt/ml/processing/mme",
         )
     ],
     outputs=[
         ProcessingOutput(
             output_name="combined",
             source="/opt/ml/processing/output",
-            destination=f"s3://{BUCKET}/{combined_prefix}"
+            destination=f"s3://{BUCKET}/{combined_prefix}",
         )
     ],
     code="combine_models.py",
     job_arguments=[
-        "--mme_input", f"s3://{BUCKET}/{mme_output_prefix}",
-        "--bucket", BUCKET,
-        "--combined_prefix", combined_prefix,
-        "--output_dir", "/opt/ml/processing/output"
-    ]
+        "--mme_input",
+        f"s3://{BUCKET}/{mme_output_prefix}",
+        "--bucket",
+        BUCKET,
+        "--combined_prefix",
+        combined_prefix,
+        "--output_dir",
+        "/opt/ml/processing/output",
+    ],
 )
 
 combined_model_uri = step_combine.properties.ProcessingOutputConfig.Outputs[
@@ -205,7 +225,8 @@ eval_processor = ScriptProcessor(
     role=role,
     command=["python3"],
     instance_type="ml.m5.xlarge",
-    instance_count=1
+    instance_count=1,
+    sagemaker_session=pipeline_session,   # IMPORTANT
 )
 
 eval_prefix = f"{PROJECT_PREFIX}/evaluation"
@@ -217,32 +238,36 @@ step_evaluate = ProcessingStep(
         ProcessingInput(
             input_name="preprocess_dir",
             source=proc_uri,
-            destination="/opt/ml/processing/pre"
+            destination="/opt/ml/processing/pre",
         ),
         ProcessingInput(
             input_name="models_dir",
             source=f"s3://{BUCKET}/{models_output_prefix}",
-            destination="/opt/ml/processing/models"
-        )
+            destination="/opt/ml/processing/models",
+        ),
     ],
     outputs=[
         ProcessingOutput(
             output_name="evaluation",
             source="/opt/ml/processing/output",
-            destination=f"s3://{BUCKET}/{eval_prefix}"
+            destination=f"s3://{BUCKET}/{eval_prefix}",
         )
     ],
     code="evaluate.py",
     job_arguments=[
-        "--preprocess_dir", "/opt/ml/processing/pre",
-        "--models_dir", "/opt/ml/processing/models",
-        "--targets", json.dumps(TARGET_COLS),
-        "--output_dir", "/opt/ml/processing/output"
-    ]
+        "--preprocess_dir",
+        "/opt/ml/processing/pre",
+        "--models_dir",
+        "/opt/ml/processing/models",
+        "--targets",
+        json.dumps(TARGET_COLS),
+        "--output_dir",
+        "/opt/ml/processing/output",
+    ],
 )
 
 # ------------------------------------
-# REGISTER MODEL
+# REGISTER MODEL (combined MME tar in custom image)
 # ------------------------------------
 step_register = RegisterModel(
     name="RegisterCustomModel",
@@ -250,23 +275,25 @@ step_register = RegisterModel(
     image_uri="<YOUR_ECR_CUSTOM_IMAGE>",
     content_types=["application/json"],
     response_types=["application/json"],
+    inference_instances=["ml.m5.xlarge"],   # you can adjust
+    transform_instances=["ml.m5.xlarge"],
     model_package_group_name="MultiTargetXGB-Custom",
     approval_status="PendingManualApproval",
     execution_role_arn=role,
 )
 
 # ------------------------------------
-# CONDITION STEP (placeholder, until you wire real metric)
+# CONDITION STEP (placeholder threshold)
 # ------------------------------------
 cond = ConditionGreaterThanOrEqualTo(
-    left=0.15,     # TODO: replace with parsed metric from evaluation.json
-    right=0.10
+    left=0.15,  # TODO: wire from evaluation.json via JsonGet
+    right=0.10,
 )
 
 # ------------------------------------
 # LAMBDA STEPS (created from local scripts)
 # ------------------------------------
-lambda_role_arn = role  # you can swap this for a dedicated Lambda IAM role later
+lambda_role_arn = role  # can be swapped for a dedicated Lambda role later
 
 # Lambda: create_model.py
 lambda_create = Lambda(
@@ -276,7 +303,7 @@ lambda_create = Lambda(
     handler="create_model.lambda_handler",
     timeout=300,
     memory_size=512,
-    session=sm_sess,   # IMPORTANT: use regular Session, not PipelineSession
+    session=sm_sess,   # regular Session is fine for Lambda
 )
 
 step_lambda_create = LambdaStep(
@@ -286,8 +313,8 @@ step_lambda_create = LambdaStep(
         "model_name": "multi-target-xgb-custom-model",
         "image_uri": "<YOUR_ECR_CUSTOM_IMAGE>",
         "model_data": combined_model_uri,
-        "role": role
-    }
+        "role": role,
+    },
 )
 
 # Lambda: update_config.py
@@ -307,8 +334,8 @@ step_lambda_config = LambdaStep(
     inputs={
         "endpoint_config": "multi-target-xgb-config",
         "model_name": "multi-target-xgb-custom-model",
-        "instance_type": "ml.m5.xlarge"
-    }
+        "instance_type": "ml.m5.xlarge",
+    },
 )
 
 # Lambda: update_endpoint.py
@@ -327,8 +354,8 @@ step_lambda_update = LambdaStep(
     lambda_func=lambda_update,
     inputs={
         "endpoint_name": "multi-target-xgb-custom-endpoint",
-        "endpoint_config": "multi-target-xgb-config"
-    }
+        "endpoint_config": "multi-target-xgb-config",
+    },
 )
 
 # ------------------------------------
@@ -338,7 +365,7 @@ step_condition = ConditionStep(
     name="CheckAccuracy",
     conditions=[cond],
     if_steps=[step_lambda_create, step_lambda_config, step_lambda_update],
-    else_steps=[]
+    else_steps=[],
 )
 
 # ------------------------------------
@@ -353,9 +380,9 @@ pipeline = Pipeline(
         step_combine,
         step_evaluate,
         step_register,
-        step_condition
+        step_condition,
     ],
-    sagemaker_session=pipeline_session
+    sagemaker_session=pipeline_session,
 )
 
 pipeline.upsert(role_arn=role)
