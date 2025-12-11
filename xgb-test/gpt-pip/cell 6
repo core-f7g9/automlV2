@@ -1,5 +1,5 @@
 # ============================
-# Cell 6 — Preprocess + Train + Repack + Combine + Evaluate
+# Cell 6 — Preprocess + Train + Repack + Combine + Evaluate + Register
 # ============================
 import os
 import json
@@ -12,6 +12,7 @@ from sagemaker.inputs import TrainingInput
 from sagemaker.workflow.pipeline_context import PipelineSession
 from sagemaker.workflow.pipeline import Pipeline
 from sagemaker.workflow.functions import Join
+from sagemaker.workflow.step_collections import RegisterModel  # NEW
 
 # Reuse region / role / BUCKET / PROJECT_PREFIX / TARGET_COLS / INPUT_FEATURES / INPUT_S3
 # from your earlier cells.
@@ -216,8 +217,19 @@ step_combine = ProcessingStep(
     depends_on=[step_repack],
 )
 
+# This is the S3 *prefix* for the combined output folder
+combined_prefix_uri = step_combine.properties.ProcessingOutputConfig.Outputs[
+    "combined"
+].S3Output.S3Uri
+
+# Our combined tar is always named model.tar.gz under that prefix
+combined_model_uri = Join(
+    on="/",
+    values=[combined_prefix_uri, "model.tar.gz"],
+)
+
 # -------------------------------
-# NEW: EVALUATION STEP
+# EVALUATION STEP
 # -------------------------------
 eval_output = (
     f"{PROJECT_NAME}/evaluation"
@@ -266,21 +278,37 @@ step_evaluate = ProcessingStep(
         "--output_dir",
         "/opt/ml/processing/output",
     ],
-    depends_on=list(train_steps.values()),  # ensure trains finish before eval
+    depends_on=list(train_steps.values()),
+)
+
+# -------------------------------
+# NEW: REGISTER MODEL STEP
+# -------------------------------
+step_register = RegisterModel(
+    name="RegisterCombinedModel",
+    model_data=combined_model_uri,               # combined model.tar.gz
+    image_uri="<YOUR_ECR_CUSTOM_IMAGE>",         # TODO: replace
+    content_types=["application/json"],
+    response_types=["application/json"],
+    inference_instances=["ml.m5.xlarge"],
+    transform_instances=["ml.m5.xlarge"],
+    model_package_group_name="MultiTargetXGB-Custom",
+    approval_status="PendingManualApproval",
+    # no explicit sagemaker_session here; it will use the pipeline session
 )
 
 # -------------------------------
 # PIPELINE DEFINITION
 # -------------------------------
 pipeline = Pipeline(
-    name="MultiTargetXGBPipeline-LIBSVM-Combined-Eval",
+    name="MultiTargetXGBPipeline-LIBSVM-Combined-Eval-Register",
     steps=(
         [step_preprocess]
         + list(train_steps.values())
-        + [step_repack, step_combine, step_evaluate]
+        + [step_repack, step_combine, step_evaluate, step_register]
     ),
     sagemaker_session=pipeline_session,
 )
 
 pipeline.upsert(role_arn=role)
-print("🎉 PIPELINE WITH COMBINE + EVAL CREATED SUCCESSFULLY!")
+print("🎉 PIPELINE WITH COMBINE + EVAL + REGISTER CREATED SUCCESSFULLY!")
