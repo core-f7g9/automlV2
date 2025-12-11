@@ -1,57 +1,43 @@
+# ============================
+# Cell 6 — WORKING + CombineModels
+# ============================
 import os
 import json
 import sagemaker
-import boto3
-
-from sagemaker.workflow.pipeline import Pipeline
-from sagemaker.workflow.steps import ProcessingStep, TrainingStep
-from sagemaker.workflow.step_collections import RegisterModel
 
 from sagemaker.processing import ScriptProcessor, ProcessingInput, ProcessingOutput
+from sagemaker.workflow.steps import ProcessingStep, TrainingStep
+from sagemaker.xgboost.estimator import XGBoost
 from sagemaker.inputs import TrainingInput
+from sagemaker.workflow.pipeline_context import PipelineSession
+from sagemaker.workflow.pipeline import Pipeline
 from sagemaker.workflow.functions import Join
 
-from sagemaker.xgboost.estimator import XGBoost
-from sagemaker.workflow.pipeline_context import PipelineSession
+# Reuse region / role / BUCKET / PROJECT_PREFIX / TARGET_COLS / INPUT_FEATURES / INPUT_S3
+# from your earlier cells.
 
-# -------------------------------------------------- #
-#  SETUP
-# -------------------------------------------------- #
-
-region = boto3.Session().region_name
-sm_sess = sagemaker.Session()
 pipeline_session = PipelineSession()
-role = sagemaker.get_execution_role()
-BUCKET = sm_sess.default_bucket()
 
-PROJECT_PREFIX = "multi-target-xgb"
-
-TARGET_COLS = ["DepartmentCode", "AccountCode", "SubAccountCode", "LocationCode"]
-INPUT_FEATURES = ["VendorName", "LineDescription", "ClubNumber"]
-
-INPUT_S3 = f"s3://{BUCKET}/{PROJECT_PREFIX}/input/data.csv"
-
-print("Region:", region)
-print("Bucket:", BUCKET)
-
-# -------------------------------------------------- #
-#  PREPROCESS STEP (ScriptProcessor.run -> step_args)
-# -------------------------------------------------- #
-
-preprocess_output_prefix = f"{PROJECT_PREFIX}/processing"
-
-preprocess_processor = ScriptProcessor(
+# -------------------------------
+# PREPROCESSING STEP
+# -------------------------------
+processor = ScriptProcessor(
     image_uri=sagemaker.image_uris.retrieve("sklearn", region, version="1.2-1"),
     role=role,
     command=["python3"],
     instance_type="ml.m5.xlarge",
     instance_count=1,
-    base_job_name="mtxgb-preprocess",
-    sagemaker_session=pipeline_session,
 )
 
-preprocess_step_args = preprocess_processor.run(
-    code="preprocess.py",
+preprocess_output = (
+    f"{PROJECT_NAME}/processing"
+    if "PROJECT_NAME" in globals()
+    else f"{PROJECT_PREFIX}/processing"
+)
+
+step_preprocess = ProcessingStep(
+    name="PreprocessData",
+    processor=processor,
     inputs=[
         ProcessingInput(
             input_name="raw_data",
@@ -63,75 +49,78 @@ preprocess_step_args = preprocess_processor.run(
         ProcessingOutput(
             output_name="proc_output",
             source="/opt/ml/processing/output",
-            destination=f"s3://{BUCKET}/{preprocess_output_prefix}",
+            destination=f"s3://{BUCKET}/{preprocess_output}",
         )
     ],
-    arguments=[
-        "--input_dir", "/opt/ml/processing/input",
-        "--targets", json.dumps(TARGET_COLS),
-        "--input_features", json.dumps(INPUT_FEATURES),
-        "--output_dir", "/opt/ml/processing/output",
-        "--tfidf_max_features", "2000",
+    code="preprocess.py",
+    job_arguments=[
+        "--input_dir",
+        "/opt/ml/processing/input",
+        "--targets",
+        json.dumps(TARGET_COLS),
+        "--input_features",
+        json.dumps(INPUT_FEATURES),
+        "--output_dir",
+        "/opt/ml/processing/output",
+        "--tfidf_max_features",
+        "2000",
     ],
 )
 
-step_preprocess = ProcessingStep(
-    name="PreprocessData",
-    step_args=preprocess_step_args,
-)
-
+# This is the Pipeline Property for the preprocess output S3 URI
 proc_uri = step_preprocess.properties.ProcessingOutputConfig.Outputs[
     "proc_output"
 ].S3Output.S3Uri
 
-# -------------------------------------------------- #
-#  TRAINING STEPS (XGBoost.fit -> step_args)
-# -------------------------------------------------- #
+# -------------------------------
+# TRAINING STEPS (LIBSVM + XGBoost)
+# -------------------------------
+models_output = (
+    f"{PROJECT_NAME}/trained-models"
+    if "PROJECT_NAME" in globals()
+    else f"{PROJECT_PREFIX}/trained-models"
+)
 
 train_steps = {}
-models_output_prefix = f"{PROJECT_PREFIX}/trained-models"
 
 for tgt in TARGET_COLS:
-
     estimator = XGBoost(
         entry_point="train.py",
         framework_version="1.5-1",
         instance_type="ml.m5.xlarge",
         instance_count=1,
         role=role,
-        output_path=f"s3://{BUCKET}/{models_output_prefix}/{tgt}",
-        base_job_name=f"mtxgb-{tgt}",
-        sagemaker_session=pipeline_session,
+        output_path=f"s3://{BUCKET}/{models_output}/{tgt}",
+        base_job_name=f"xgb-{tgt}",
     )
 
+    # Valid S3 paths using Join() – Pipeline-safe
     train_path = Join(on="/", values=[proc_uri, tgt, "train.libsvm"])
-    val_path   = Join(on="/", values=[proc_uri, tgt, "val.libsvm"])
-
-    train_step_args = estimator.fit(
-        inputs={
-            "train": TrainingInput(
-                s3_data=train_path,
-                content_type="text/libsvm",
-            ),
-            "validation": TrainingInput(
-                s3_data=val_path,
-                content_type="text/libsvm",
-            ),
-        }
-    )
+    val_path = Join(on="/", values=[proc_uri, tgt, "val.libsvm"])
 
     step_train = TrainingStep(
         name=f"Train_{tgt}",
-        step_args=train_step_args,
+        estimator=estimator,
+        inputs={
+            "train": TrainingInput(
+                s3_data=train_path, content_type="text/libsvm"
+            ),
+            "validation": TrainingInput(
+                s3_data=val_path, content_type="text/libsvm"
+            ),
+        },
     )
 
     train_steps[tgt] = step_train
 
-# -------------------------------------------------- #
-#  REPACK STEP (ScriptProcessor.run -> step_args)
-# -------------------------------------------------- #
-
-mme_output_prefix = f"{PROJECT_PREFIX}/mme-packaged"
+# -------------------------------
+# REPACK STEP (same as before)
+# -------------------------------
+mme_output = (
+    f"{PROJECT_NAME}/mme-packaged"
+    if "PROJECT_NAME" in globals()
+    else f"{PROJECT_PREFIX}/mme-packaged"
+)
 
 repack_processor = ScriptProcessor(
     image_uri=sagemaker.image_uris.retrieve("sklearn", region, version="1.2-1"),
@@ -139,21 +128,20 @@ repack_processor = ScriptProcessor(
     command=["python3"],
     instance_type="ml.m5.xlarge",
     instance_count=1,
-    base_job_name="mtxgb-repack",
-    sagemaker_session=pipeline_session,
 )
 
-repack_step_args = repack_processor.run(
-    code="repack_for_mme.py",
+step_repack = ProcessingStep(
+    name="RepackModelsForMME",
+    processor=repack_processor,
     inputs=[
         ProcessingInput(
             input_name="models_dir",
-            source=f"s3://{BUCKET}/{models_output_prefix}",
+            source=f"s3://{BUCKET}/{models_output}",
             destination="/opt/ml/processing/models",
         ),
         ProcessingInput(
             input_name="preprocess_dir",
-            source=proc_uri,
+            source=proc_uri,  # the preprocess output
             destination="/opt/ml/processing/preprocess",
         ),
         ProcessingInput(
@@ -166,27 +154,29 @@ repack_step_args = repack_processor.run(
         ProcessingOutput(
             output_name="mme_models",
             source="/opt/ml/processing/output",
-            destination=f"s3://{BUCKET}/{mme_output_prefix}",
+            destination=f"s3://{BUCKET}/{mme_output}",
         )
     ],
-    arguments=[
-        "--models_dir", "/opt/ml/processing/models",
-        "--preprocess_dir", "/opt/ml/processing/preprocess",
-        "--output_dir", "/opt/ml/processing/output",
+    code="repack_for_mme.py",
+    job_arguments=[
+        "--models_dir",
+        "/opt/ml/processing/models",
+        "--preprocess_dir",
+        "/opt/ml/processing/preprocess",
+        "--output_dir",
+        "/opt/ml/processing/output",
     ],
-)
-
-step_repack = ProcessingStep(
-    name="RepackModelsForMME",
-    step_args=repack_step_args,
     depends_on=list(train_steps.values()),
 )
 
-# -------------------------------------------------- #
-#  COMBINE MODELS STEP (ScriptProcessor.run -> step_args)
-# -------------------------------------------------- #
-
-combined_prefix = f"{PROJECT_PREFIX}/combined"
+# -------------------------------
+# NEW: COMBINE MODELS STEP
+# -------------------------------
+combined_output = (
+    f"{PROJECT_NAME}/combined"
+    if "PROJECT_NAME" in globals()
+    else f"{PROJECT_PREFIX}/combined"
+)
 
 combine_processor = ScriptProcessor(
     image_uri=sagemaker.image_uris.retrieve("sklearn", region, version="1.2-1"),
@@ -194,16 +184,15 @@ combine_processor = ScriptProcessor(
     command=["python3"],
     instance_type="ml.m5.xlarge",
     instance_count=1,
-    base_job_name="mtxgb-combine",
-    sagemaker_session=pipeline_session,
 )
 
-combine_step_args = combine_processor.run(
-    code="combine_models.py",
+step_combine = ProcessingStep(
+    name="CombineModels",
+    processor=combine_processor,
     inputs=[
         ProcessingInput(
             input_name="mme_input",
-            source=f"s3://{BUCKET}/{mme_output_prefix}",
+            source=f"s3://{BUCKET}/{mme_output}",
             destination="/opt/ml/processing/mme",
         )
     ],
@@ -211,109 +200,31 @@ combine_step_args = combine_processor.run(
         ProcessingOutput(
             output_name="combined",
             source="/opt/ml/processing/output",
-            destination=f"s3://{BUCKET}/{combined_prefix}",
+            destination=f"s3://{BUCKET}/{combined_output}",
         )
     ],
-    arguments=[
-        "--mme_input", f"{PROJECT_PREFIX}/mme-packaged",
-        "--bucket", BUCKET,
-        "--combined_prefix", combined_prefix,
-        "--output_dir", "/opt/ml/processing/output",
+    code="combine_models.py",
+    job_arguments=[
+        "--mme_input",
+        mme_output,  # prefix used by combine_models.py for S3 pagination
+        "--bucket",
+        BUCKET,
+        "--combined_prefix",
+        combined_output,
+        "--output_dir",
+        "/opt/ml/processing/output",
     ],
+    depends_on=[step_repack],
 )
 
-step_combine = ProcessingStep(
-    name="CombineModels",
-    step_args=combine_step_args,
-)
-
-combined_model_uri = step_combine.properties.ProcessingOutputConfig.Outputs[
-    "combined"
-].S3Output.S3Uri
-
-# -------------------------------------------------- #
-#  EVALUATION STEP (ScriptProcessor.run -> step_args)
-# -------------------------------------------------- #
-
-eval_prefix = f"{PROJECT_PREFIX}/evaluation"
-
-eval_processor = ScriptProcessor(
-    image_uri=sagemaker.image_uris.retrieve("xgboost", region, version="1.5-1"),
-    role=role,
-    command=["python3"],
-    instance_type="ml.m5.xlarge",
-    instance_count=1,
-    base_job_name="mtxgb-eval",
-    sagemaker_session=pipeline_session,
-)
-
-eval_step_args = eval_processor.run(
-    code="evaluate.py",
-    inputs=[
-        ProcessingInput(
-            input_name="preprocess_dir",
-            source=proc_uri,
-            destination="/opt/ml/processing/pre",
-        ),
-        ProcessingInput(
-            input_name="models_dir",
-            source=f"s3://{BUCKET}/{models_output_prefix}",
-            destination="/opt/ml/processing/models",
-        ),
-    ],
-    outputs=[
-        ProcessingOutput(
-            output_name="evaluation",
-            source="/opt/ml/processing/output",
-            destination=f"s3://{BUCKET}/{eval_prefix}",
-        )
-    ],
-    arguments=[
-        "--preprocess_dir", "/opt/ml/processing/pre",
-        "--models_dir", "/opt/ml/processing/models",
-        "--targets", json.dumps(TARGET_COLS),
-        "--output_dir", "/opt/ml/processing/output",
-    ],
-)
-
-step_evaluate = ProcessingStep(
-    name="EvaluateModel",
-    step_args=eval_step_args,
-)
-
-# -------------------------------------------------- #
-#  REGISTER MODEL (combined MME tar, custom image)
-# -------------------------------------------------- #
-
-step_register = RegisterModel(
-    name="RegisterCustomModel",
-    model_data=combined_model_uri,
-    image_uri="<YOUR_ECR_CUSTOM_IMAGE>",
-    content_types=["application/json"],
-    response_types=["application/json"],
-    inference_instances=["ml.m5.xlarge"],
-    transform_instances=["ml.m5.xlarge"],
-    model_package_group_name="MultiTargetXGB-Custom",
-    approval_status="PendingManualApproval",
-    execution_role_arn=role,
-)
-
-# -------------------------------------------------- #
-#  FINAL PIPELINE (no deployment / Lambda for now)
-# -------------------------------------------------- #
-
+# -------------------------------
+# PIPELINE DEFINITION
+# -------------------------------
 pipeline = Pipeline(
-    name="MultiTargetXGB-CustomContainer-Pipeline",
-    steps=[
-        step_preprocess,
-        *train_steps.values(),
-        step_repack,
-        step_combine,
-        step_evaluate,
-        step_register,
-    ],
+    name="MultiTargetXGBPipeline-LIBSVM-Combined",
+    steps=[step_preprocess] + list(train_steps.values()) + [step_repack, step_combine],
     sagemaker_session=pipeline_session,
 )
 
 pipeline.upsert(role_arn=role)
-print("PIPELINE READY.")
+print("🎉 PIPELINE WITH COMBINE CREATED SUCCESSFULLY!")
