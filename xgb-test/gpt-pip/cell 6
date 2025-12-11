@@ -276,7 +276,7 @@ lambda_create = Lambda(
     handler="create_model.lambda_handler",
     timeout=300,
     memory_size=512,
-    session=pipeline_session,
+    sagemaker_session=sm_sess,   # use regular Session, not PipelineSession
 )
 
 step_lambda_create = LambdaStep(
@@ -298,7 +298,7 @@ lambda_config = Lambda(
     handler="update_config.lambda_handler",
     timeout=300,
     memory_size=512,
-    session=pipeline_session,
+    sagemaker_session=sm_sess,
 )
 
 step_lambda_config = LambdaStep(
@@ -319,7 +319,7 @@ lambda_update = Lambda(
     handler="update_endpoint.lambda_handler",
     timeout=300,
     memory_size=512,
-    session=pipeline_session,
+    sagemaker_session=sm_sess,
 )
 
 step_lambda_update = LambdaStep(
