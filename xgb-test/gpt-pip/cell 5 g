@@ -2,6 +2,7 @@
 import argparse
 import boto3
 import botocore
+import os
 
 
 def safe_delete_endpoint(sm, endpoint_name: str):
@@ -29,6 +30,17 @@ def safe_delete_model(sm, model_name: str):
 
 
 def main():
+    # REQUIRED FIX -----------------------------------------
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    if not region:
+        raise ValueError("AWS_REGION not set in environment!")
+
+    print("[deploy] Using region:", region)
+
+    sm = boto3.client("sagemaker", region_name=region)
+    sts = boto3.client("sts", region_name=region)
+    # --------------------------------------------------------
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name")
     parser.add_argument("--endpoint_config_name")
@@ -41,12 +53,12 @@ def main():
 
     print("[deploy] Args:", args)
 
-    sm = boto3.client("sagemaker")
-
-    # 1) Clean up any existing resources with these names (idempotent-ish)
+    # 1) Clean up old resources
     safe_delete_endpoint(sm, args.endpoint_name)
     safe_delete_endpoint_config(sm, args.endpoint_config_name)
     safe_delete_model(sm, args.model_name)
+
+    role_arn = sts.get_caller_identity()["Arn"].rsplit("/", 1)[0]
 
     # 2) Create new model
     print("[deploy] Creating model...")
@@ -56,10 +68,9 @@ def main():
             "Image": args.image_uri,
             "ModelDataUrl": args.model_data,
         },
-        ExecutionRoleArn=boto3.client("sts").get_caller_identity()["Arn"].rsplit("/", 1)[0]
-        # NOTE: if needed, you can pass an explicit role via env or another arg.
+        ExecutionRoleArn=role_arn,
     )
-    print("[deploy] Model created:", args.model_name)
+    print("[deploy] Created model:", args.model_name)
 
     # 3) Create endpoint config
     print("[deploy] Creating endpoint config...")
@@ -74,7 +85,7 @@ def main():
             }
         ],
     )
-    print("[deploy] Endpoint config created:", args.endpoint_config_name)
+    print("[deploy] Created endpoint config:", args.endpoint_config_name)
 
     # 4) Create endpoint
     print("[deploy] Creating endpoint...")
@@ -83,7 +94,6 @@ def main():
         EndpointConfigName=args.endpoint_config_name,
     )
     print("[deploy] Endpoint creation started:", args.endpoint_name)
-    print("[deploy] You can monitor status in the SageMaker console.")
 
 
 if __name__ == "__main__":
