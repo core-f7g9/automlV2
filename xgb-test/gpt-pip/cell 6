@@ -3,7 +3,7 @@ import json
 import sagemaker
 import boto3
 
-# ---------------- Correct Imports ---------------- #
+# ---------------- Imports ---------------- #
 from sagemaker.workflow.pipeline import Pipeline
 from sagemaker.workflow.steps import ProcessingStep, TrainingStep
 from sagemaker.workflow.step_collections import RegisterModel
@@ -18,15 +18,18 @@ from sagemaker.workflow.condition_step import ConditionStep
 from sagemaker.xgboost.estimator import XGBoost
 from sagemaker.workflow.pipeline_context import PipelineSession
 
-# NEW: Import for ModelStep approach
+# NEW: Model + ModelStep
 from sagemaker.workflow.model_step import ModelStep
 from sagemaker.model import Model
 
 # -------------------------------------------------- #
 
 region = boto3.Session().region_name
-sm_sess = sagemaker.Session()          # regular session
-pipeline_session = PipelineSession()   # MUST be used for all pipeline-bound jobs
+
+# IMPORTANT: single PipelineSession for all pipeline jobs
+pipeline_session = PipelineSession()
+sm_sess = pipeline_session
+
 role = sagemaker.get_execution_role()
 BUCKET = sm_sess.default_bucket()
 
@@ -47,7 +50,7 @@ processor = ScriptProcessor(
     command=["python3"],
     instance_type="ml.m5.xlarge",
     instance_count=1,
-    sagemaker_session=pipeline_session,   # IMPORTANT
+    sagemaker_session=pipeline_session,
 )
 
 preprocess_output_prefix = f"{PROJECT_PREFIX}/processing"
@@ -104,7 +107,7 @@ for tgt in TARGET_COLS:
         role=role,
         output_path=f"s3://{BUCKET}/{models_output_prefix}/{tgt}",
         base_job_name=f"xgb-{tgt}",
-        sagemaker_session=pipeline_session,   # IMPORTANT
+        sagemaker_session=pipeline_session,
     )
 
     train_path = Join(on="/", values=[proc_uri, tgt, "train.libsvm"])
@@ -136,7 +139,7 @@ repack_processor = ScriptProcessor(
     command=["python3"],
     instance_type="ml.m5.xlarge",
     instance_count=1,
-    sagemaker_session=pipeline_session,   # IMPORTANT
+    sagemaker_session=pipeline_session,
 )
 
 step_repack = ProcessingStep(
@@ -179,7 +182,7 @@ combine_processor = ScriptProcessor(
     command=["python3"],
     instance_type="ml.m5.xlarge",
     instance_count=1,
-    sagemaker_session=pipeline_session,   # IMPORTANT
+    sagemaker_session=pipeline_session,
 )
 
 combined_prefix = f"{PROJECT_PREFIX}/combined"
@@ -214,9 +217,15 @@ step_combine = ProcessingStep(
     ],
 )
 
-combined_model_uri = step_combine.properties.ProcessingOutputConfig.Outputs[
+# NOTE: 'combined' S3Uri is a prefix; the actual tar is model.tar.gz under that prefix
+combined_model_prefix = step_combine.properties.ProcessingOutputConfig.Outputs[
     "combined"
 ].S3Output.S3Uri
+
+combined_model_uri = Join(
+    on="/",
+    values=[combined_model_prefix, "model.tar.gz"]
+)
 
 # ------------------------------------
 # EVALUATION STEP
@@ -227,7 +236,7 @@ eval_processor = ScriptProcessor(
     command=["python3"],
     instance_type="ml.m5.xlarge",
     instance_count=1,
-    sagemaker_session=pipeline_session,   # IMPORTANT
+    sagemaker_session=pipeline_session,
 )
 
 eval_prefix = f"{PROJECT_PREFIX}/evaluation"
@@ -268,15 +277,15 @@ step_evaluate = ProcessingStep(
 )
 
 # ------------------------------------
-# REGISTER MODEL (combined MME tar in custom image)
+# REGISTER MODEL (combined tar in custom image)
 # ------------------------------------
 step_register = RegisterModel(
     name="RegisterCustomModel",
     model_data=combined_model_uri,
-    image_uri="<YOUR_ECR_CUSTOM_IMAGE>",
+    image_uri="<YOUR_ECR_CUSTOM_IMAGE>",  # TODO: replace
     content_types=["application/json"],
     response_types=["application/json"],
-    inference_instances=["ml.m5.xlarge"],   # you can adjust
+    inference_instances=["ml.m5.xlarge"],
     transform_instances=["ml.m5.xlarge"],
     model_package_group_name="MultiTargetXGB-Custom",
     approval_status="PendingManualApproval",
@@ -287,35 +296,33 @@ step_register = RegisterModel(
 # CONDITION STEP (placeholder threshold)
 # ------------------------------------
 cond = ConditionGreaterThanOrEqualTo(
-    left=0.15,  # TODO: wire from evaluation.json via JsonGet
+    left=0.15,   # TODO: wire real metric from evaluation.json
     right=0.10,
 )
 
 # ------------------------------------
-# MODEL DEPLOYMENT STEPS (REPLACED LAMBDA WITH MODELSTEP)
+# MODEL + DEPLOYMENT STEPS (ModelStep + ProcessingStep)
 # ------------------------------------
 
-# Create a Model object for deployment
+# Create a Model object for deployment using the combined MME tar
 custom_model = Model(
-    image_uri="<YOUR_ECR_CUSTOM_IMAGE>",  # Replace with your actual ECR image URI
+    image_uri="<YOUR_ECR_CUSTOM_IMAGE>",  # same custom container
     model_data=combined_model_uri,
     role=role,
     sagemaker_session=pipeline_session,
 )
 
-# ModelStep to create the model
-step_create_model = ModelStep(
-    name="CreateModel",
-    step_args=custom_model.create(
-        instance_type="ml.m5.xlarge",
-    ),
+# Step to create the SageMaker model resource
+create_model_args = custom_model.create(
+    instance_type="ml.m5.xlarge"   # required by some containers; ignored by others
 )
 
-# Note: For endpoint creation/update, you have two options:
-# Option A: Handle endpoint deployment outside the pipeline (manually or via separate script)
-# Option B: Use a custom processing step that calls boto3 to create/update endpoint
+step_create_model = ModelStep(
+    name="CreateCustomModel",
+    step_args=create_model_args,
+)
 
-# OPTION B: Processing step for endpoint deployment
+# Processing step that runs deploy_endpoint.py to create/update the endpoint via boto3
 endpoint_processor = ScriptProcessor(
     image_uri=sagemaker.image_uris.retrieve("sklearn", region, version="1.2-1"),
     role=role,
@@ -325,11 +332,10 @@ endpoint_processor = ScriptProcessor(
     sagemaker_session=pipeline_session,
 )
 
-# You'll need to create this script
 step_deploy_endpoint = ProcessingStep(
     name="DeployEndpoint",
     processor=endpoint_processor,
-    code="deploy_endpoint.py",  # Create this script (shown below)
+    code="deploy_endpoint.py",  # script below
     job_arguments=[
         "--model-name", custom_model.name,
         "--endpoint-name", "multi-target-xgb-custom-endpoint",
@@ -338,10 +344,12 @@ step_deploy_endpoint = ProcessingStep(
         "--region", region,
         "--role", role,
     ],
+    depends_on=[step_create_model],
 )
 
 # ------------------------------------
 # CONDITION: Only deploy if model is good
+# (Right now always true; will refine later when wiring evaluation.json)
 # ------------------------------------
 step_condition = ConditionStep(
     name="CheckAccuracy",
