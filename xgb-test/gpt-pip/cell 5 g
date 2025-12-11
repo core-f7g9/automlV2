@@ -30,15 +30,15 @@ def safe_delete_model(sm, model_name: str):
 
 
 def main():
-    # Region fix
+    # ---------------- Region setup ----------------
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
     if not region:
         raise ValueError("AWS_REGION / AWS_DEFAULT_REGION not set in environment")
-
     print("[deploy] Using region:", region)
 
     sm = boto3.client("sagemaker", region_name=region)
 
+    # ---------------- Parse args ----------------
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name")
     parser.add_argument("--endpoint_config_name")
@@ -47,17 +47,26 @@ def main():
     parser.add_argument("--model_data")
     parser.add_argument("--instance_type")
     parser.add_argument("--instance_count", type=int, default=1)
-    parser.add_argument("--role_arn")  # NEW
     args = parser.parse_args()
 
     print("[deploy] Args:", args)
 
-    # 1) Clean up old resources
+    # ---------------- Infer ExecutionRoleArn from this processing job ----------------
+    processing_job_name = os.environ.get("PROCESSING_JOB_NAME")
+    if not processing_job_name:
+        raise ValueError("PROCESSING_JOB_NAME not set – are we running inside a Processing job?")
+
+    print("[deploy] Describe processing job:", processing_job_name)
+    desc = sm.describe_processing_job(ProcessingJobName=processing_job_name)
+    role_arn = desc["RoleArn"]
+    print("[deploy] Using RoleArn from processing job:", role_arn)
+
+    # ---------------- Clean up old resources ----------------
     safe_delete_endpoint(sm, args.endpoint_name)
     safe_delete_endpoint_config(sm, args.endpoint_config_name)
     safe_delete_model(sm, args.model_name)
 
-    # 2) Create new model with the IAM role ARN passed from pipeline
+    # ---------------- Create new model ----------------
     print("[deploy] Creating model...")
     sm.create_model(
         ModelName=args.model_name,
@@ -65,11 +74,11 @@ def main():
             "Image": args.image_uri,
             "ModelDataUrl": args.model_data,
         },
-        ExecutionRoleArn=args.role_arn,
+        ExecutionRoleArn=role_arn,
     )
     print("[deploy] Created model:", args.model_name)
 
-    # 3) Create endpoint config
+    # ---------------- Create endpoint config ----------------
     print("[deploy] Creating endpoint config...")
     sm.create_endpoint_config(
         EndpointConfigName=args.endpoint_config_name,
@@ -84,7 +93,7 @@ def main():
     )
     print("[deploy] Created endpoint config:", args.endpoint_config_name)
 
-    # 4) Create endpoint
+    # ---------------- Create endpoint ----------------
     print("[deploy] Creating endpoint...")
     sm.create_endpoint(
         EndpointName=args.endpoint_name,
