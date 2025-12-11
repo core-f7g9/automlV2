@@ -252,7 +252,7 @@ step_register = RegisterModel(
     response_types=["application/json"],
     model_package_group_name="MultiTargetXGB-Custom",
     approval_status="PendingManualApproval",
-    execution_role_arn=role,   # correct param name
+    execution_role_arn=role,
 )
 
 # ------------------------------------
@@ -276,7 +276,7 @@ lambda_create = Lambda(
     handler="create_model.lambda_handler",
     timeout=300,
     memory_size=512,
-    sagemaker_session=sm_sess,   # use regular Session, not PipelineSession
+    session=sm_sess,   # IMPORTANT: use regular Session, not PipelineSession
 )
 
 step_lambda_create = LambdaStep(
@@ -298,7 +298,7 @@ lambda_config = Lambda(
     handler="update_config.lambda_handler",
     timeout=300,
     memory_size=512,
-    sagemaker_session=sm_sess,
+    session=sm_sess,
 )
 
 step_lambda_config = LambdaStep(
@@ -319,7 +319,7 @@ lambda_update = Lambda(
     handler="update_endpoint.lambda_handler",
     timeout=300,
     memory_size=512,
-    sagemaker_session=sm_sess,
+    session=sm_sess,
 )
 
 step_lambda_update = LambdaStep(
