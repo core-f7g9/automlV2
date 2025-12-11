@@ -1,5 +1,5 @@
 # ============================
-# Cell 6 — WORKING + CombineModels
+# Cell 6 — Preprocess + Train + Repack + Combine + Evaluate
 # ============================
 import os
 import json
@@ -67,7 +67,7 @@ step_preprocess = ProcessingStep(
     ],
 )
 
-# This is the Pipeline Property for the preprocess output S3 URI
+# Pipeline property for preprocess output S3 URI
 proc_uri = step_preprocess.properties.ProcessingOutputConfig.Outputs[
     "proc_output"
 ].S3Output.S3Uri
@@ -94,9 +94,8 @@ for tgt in TARGET_COLS:
         base_job_name=f"xgb-{tgt}",
     )
 
-    # Valid S3 paths using Join() – Pipeline-safe
     train_path = Join(on="/", values=[proc_uri, tgt, "train.libsvm"])
-    val_path = Join(on="/", values=[proc_uri, tgt, "val.libsvm"])
+    val_path   = Join(on="/", values=[proc_uri, tgt, "val.libsvm"])
 
     step_train = TrainingStep(
         name=f"Train_{tgt}",
@@ -114,7 +113,7 @@ for tgt in TARGET_COLS:
     train_steps[tgt] = step_train
 
 # -------------------------------
-# REPACK STEP (same as before)
+# REPACK STEP
 # -------------------------------
 mme_output = (
     f"{PROJECT_NAME}/mme-packaged"
@@ -141,7 +140,7 @@ step_repack = ProcessingStep(
         ),
         ProcessingInput(
             input_name="preprocess_dir",
-            source=proc_uri,  # the preprocess output
+            source=proc_uri,
             destination="/opt/ml/processing/preprocess",
         ),
         ProcessingInput(
@@ -170,7 +169,7 @@ step_repack = ProcessingStep(
 )
 
 # -------------------------------
-# NEW: COMBINE MODELS STEP
+# COMBINE MODELS STEP
 # -------------------------------
 combined_output = (
     f"{PROJECT_NAME}/combined"
@@ -218,13 +217,70 @@ step_combine = ProcessingStep(
 )
 
 # -------------------------------
+# NEW: EVALUATION STEP
+# -------------------------------
+eval_output = (
+    f"{PROJECT_NAME}/evaluation"
+    if "PROJECT_NAME" in globals()
+    else f"{PROJECT_PREFIX}/evaluation"
+)
+
+eval_processor = ScriptProcessor(
+    image_uri=sagemaker.image_uris.retrieve("xgboost", region, version="1.5-1"),
+    role=role,
+    command=["python3"],
+    instance_type="ml.m5.xlarge",
+    instance_count=1,
+)
+
+step_evaluate = ProcessingStep(
+    name="EvaluateModel",
+    processor=eval_processor,
+    inputs=[
+        ProcessingInput(
+            input_name="preprocess_dir",
+            source=proc_uri,
+            destination="/opt/ml/processing/pre",
+        ),
+        ProcessingInput(
+            input_name="models_dir",
+            source=f"s3://{BUCKET}/{models_output}",
+            destination="/opt/ml/processing/models",
+        ),
+    ],
+    outputs=[
+        ProcessingOutput(
+            output_name="evaluation",
+            source="/opt/ml/processing/output",
+            destination=f"s3://{BUCKET}/{eval_output}",
+        )
+    ],
+    code="evaluate.py",
+    job_arguments=[
+        "--preprocess_dir",
+        "/opt/ml/processing/pre",
+        "--models_dir",
+        "/opt/ml/processing/models",
+        "--targets",
+        json.dumps(TARGET_COLS),
+        "--output_dir",
+        "/opt/ml/processing/output",
+    ],
+    depends_on=list(train_steps.values()),  # ensure trains finish before eval
+)
+
+# -------------------------------
 # PIPELINE DEFINITION
 # -------------------------------
 pipeline = Pipeline(
-    name="MultiTargetXGBPipeline-LIBSVM-Combined",
-    steps=[step_preprocess] + list(train_steps.values()) + [step_repack, step_combine],
+    name="MultiTargetXGBPipeline-LIBSVM-Combined-Eval",
+    steps=(
+        [step_preprocess]
+        + list(train_steps.values())
+        + [step_repack, step_combine, step_evaluate]
+    ),
     sagemaker_session=pipeline_session,
 )
 
 pipeline.upsert(role_arn=role)
-print("🎉 PIPELINE WITH COMBINE CREATED SUCCESSFULLY!")
+print("🎉 PIPELINE WITH COMBINE + EVAL CREATED SUCCESSFULLY!")
