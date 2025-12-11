@@ -5,11 +5,11 @@ import boto3
 
 # ---------------- Correct Imports ---------------- #
 from sagemaker.workflow.pipeline import Pipeline
-from sagemaker.workflow.steps import ProcessingStep, TrainingStep        # ONLY these two
+from sagemaker.workflow.steps import ProcessingStep, TrainingStep
 from sagemaker.workflow.step_collections import RegisterModel
 
-from sagemaker.workflow.lambda_step import LambdaStep                   # Correct import
-from sagemaker.lambda_helper import Lambda                              # Required
+from sagemaker.workflow.lambda_step import LambdaStep
+from sagemaker.lambda_helper import Lambda
 
 from sagemaker.processing import ScriptProcessor, ProcessingInput, ProcessingOutput
 from sagemaker.inputs import TrainingInput
@@ -53,7 +53,7 @@ step_preprocess = ProcessingStep(
     inputs=[
         ProcessingInput(
             input_name="raw_data",
-            source=INPUT_S3,
+            source=INPUT_S3,  # assumes INPUT_S3 is defined in a previous cell
             destination="/opt/ml/processing/input"
         )
     ],
@@ -248,27 +248,35 @@ step_register = RegisterModel(
     name="RegisterCustomModel",
     model_data=combined_model_uri,
     image_uri="<YOUR_ECR_CUSTOM_IMAGE>",
-    content_types=["application/json"],     
-    response_types=["application/json"],    
+    content_types=["application/json"],
+    response_types=["application/json"],
     model_package_group_name="MultiTargetXGB-Custom",
     approval_status="PendingManualApproval",
-    role=role,
+    execution_role_arn=role,   # correct param name
 )
 
 # ------------------------------------
-# CONDITION STEP
+# CONDITION STEP (placeholder, until you wire real metric)
 # ------------------------------------
 cond = ConditionGreaterThanOrEqualTo(
-    left=0.15,     # <-- TEMP: until evaluation.py emits a proper metric
+    left=0.15,     # TODO: replace with parsed metric from evaluation.json
     right=0.10
 )
 
 # ------------------------------------
-# LAMBDA STEPS
+# LAMBDA STEPS (created from local scripts)
 # ------------------------------------
+lambda_role_arn = role  # you can swap this for a dedicated Lambda IAM role later
+
+# Lambda: create_model.py
 lambda_create = Lambda(
-    function_name="lambda-create-model",
-    session=pipeline_session
+    function_name="multi-target-xgb-create-model",
+    execution_role_arn=lambda_role_arn,
+    script="create_model.py",
+    handler="create_model.lambda_handler",
+    timeout=300,
+    memory_size=512,
+    session=pipeline_session,
 )
 
 step_lambda_create = LambdaStep(
@@ -282,9 +290,15 @@ step_lambda_create = LambdaStep(
     }
 )
 
+# Lambda: update_config.py
 lambda_config = Lambda(
-    function_name="lambda-update-config",
-    session=pipeline_session
+    function_name="multi-target-xgb-update-config",
+    execution_role_arn=lambda_role_arn,
+    script="update_config.py",
+    handler="update_config.lambda_handler",
+    timeout=300,
+    memory_size=512,
+    session=pipeline_session,
 )
 
 step_lambda_config = LambdaStep(
@@ -297,9 +311,15 @@ step_lambda_config = LambdaStep(
     }
 )
 
+# Lambda: update_endpoint.py
 lambda_update = Lambda(
-    function_name="lambda-update-endpoint",
-    session=pipeline_session
+    function_name="multi-target-xgb-update-endpoint",
+    execution_role_arn=lambda_role_arn,
+    script="update_endpoint.py",
+    handler="update_endpoint.lambda_handler",
+    timeout=300,
+    memory_size=512,
+    session=pipeline_session,
 )
 
 step_lambda_update = LambdaStep(
