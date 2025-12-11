@@ -1,0 +1,90 @@
+%%writefile deploy_endpoint.py
+import argparse
+import boto3
+import botocore
+
+
+def safe_delete_endpoint(sm, endpoint_name: str):
+    try:
+        sm.delete_endpoint(EndpointName=endpoint_name)
+        print(f"[deploy] Deleted endpoint: {endpoint_name}")
+    except botocore.exceptions.ClientError as e:
+        print(f"[deploy] delete_endpoint skipped: {e.response.get('Error', {}).get('Message')}")
+
+
+def safe_delete_endpoint_config(sm, config_name: str):
+    try:
+        sm.delete_endpoint_config(EndpointConfigName=config_name)
+        print(f"[deploy] Deleted endpoint config: {config_name}")
+    except botocore.exceptions.ClientError as e:
+        print(f"[deploy] delete_endpoint_config skipped: {e.response.get('Error', {}).get('Message')}")
+
+
+def safe_delete_model(sm, model_name: str):
+    try:
+        sm.delete_model(ModelName=model_name)
+        print(f"[deploy] Deleted model: {model_name}")
+    except botocore.exceptions.ClientError as e:
+        print(f"[deploy] delete_model skipped: {e.response.get('Error', {}).get('Message')}")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_name")
+    parser.add_argument("--endpoint_config_name")
+    parser.add_argument("--endpoint_name")
+    parser.add_argument("--image_uri")
+    parser.add_argument("--model_data")
+    parser.add_argument("--instance_type")
+    parser.add_argument("--instance_count", type=int, default=1)
+    args = parser.parse_args()
+
+    print("[deploy] Args:", args)
+
+    sm = boto3.client("sagemaker")
+
+    # 1) Clean up any existing resources with these names (idempotent-ish)
+    safe_delete_endpoint(sm, args.endpoint_name)
+    safe_delete_endpoint_config(sm, args.endpoint_config_name)
+    safe_delete_model(sm, args.model_name)
+
+    # 2) Create new model
+    print("[deploy] Creating model...")
+    sm.create_model(
+        ModelName=args.model_name,
+        PrimaryContainer={
+            "Image": args.image_uri,
+            "ModelDataUrl": args.model_data,
+        },
+        ExecutionRoleArn=boto3.client("sts").get_caller_identity()["Arn"].rsplit("/", 1)[0]
+        # NOTE: if needed, you can pass an explicit role via env or another arg.
+    )
+    print("[deploy] Model created:", args.model_name)
+
+    # 3) Create endpoint config
+    print("[deploy] Creating endpoint config...")
+    sm.create_endpoint_config(
+        EndpointConfigName=args.endpoint_config_name,
+        ProductionVariants=[
+            {
+                "VariantName": "AllTraffic",
+                "ModelName": args.model_name,
+                "InstanceType": args.instance_type,
+                "InitialInstanceCount": args.instance_count,
+            }
+        ],
+    )
+    print("[deploy] Endpoint config created:", args.endpoint_config_name)
+
+    # 4) Create endpoint
+    print("[deploy] Creating endpoint...")
+    sm.create_endpoint(
+        EndpointName=args.endpoint_name,
+        EndpointConfigName=args.endpoint_config_name,
+    )
+    print("[deploy] Endpoint creation started:", args.endpoint_name)
+    print("[deploy] You can monitor status in the SageMaker console.")
+
+
+if __name__ == "__main__":
+    main()

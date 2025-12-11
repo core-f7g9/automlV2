@@ -1,5 +1,5 @@
 # ============================
-# Cell 6 — Preprocess + Train + Repack + Combine + Evaluate + Register
+# Cell 6 — Preprocess + Train + Repack + Combine + Evaluate + Deploy
 # ============================
 import os
 import json
@@ -12,10 +12,8 @@ from sagemaker.inputs import TrainingInput
 from sagemaker.workflow.pipeline_context import PipelineSession
 from sagemaker.workflow.pipeline import Pipeline
 from sagemaker.workflow.functions import Join
-from sagemaker.workflow.step_collections import RegisterModel  # NEW
 
 # Reuse region / role / BUCKET / PROJECT_PREFIX / TARGET_COLS / INPUT_FEATURES / INPUT_S3
-# from your earlier cells.
 
 pipeline_session = PipelineSession()
 
@@ -68,13 +66,12 @@ step_preprocess = ProcessingStep(
     ],
 )
 
-# Pipeline property for preprocess output S3 URI
 proc_uri = step_preprocess.properties.ProcessingOutputConfig.Outputs[
     "proc_output"
 ].S3Output.S3Uri
 
 # -------------------------------
-# TRAINING STEPS (LIBSVM + XGBoost)
+# TRAINING STEPS
 # -------------------------------
 models_output = (
     f"{PROJECT_NAME}/trained-models"
@@ -206,7 +203,7 @@ step_combine = ProcessingStep(
     code="combine_models.py",
     job_arguments=[
         "--mme_input",
-        mme_output,  # prefix used by combine_models.py for S3 pagination
+        mme_output,
         "--bucket",
         BUCKET,
         "--combined_prefix",
@@ -217,12 +214,12 @@ step_combine = ProcessingStep(
     depends_on=[step_repack],
 )
 
-# This is the S3 *prefix* for the combined output folder
+# Pipeline property for combined prefix S3 URI
 combined_prefix_uri = step_combine.properties.ProcessingOutputConfig.Outputs[
     "combined"
 ].S3Output.S3Uri
 
-# Our combined tar is always named model.tar.gz under that prefix
+# Full S3 URI to model.tar.gz
 combined_model_uri = Join(
     on="/",
     values=[combined_prefix_uri, "model.tar.gz"],
@@ -282,33 +279,53 @@ step_evaluate = ProcessingStep(
 )
 
 # -------------------------------
-# NEW: REGISTER MODEL STEP
+# NEW: DEPLOYMENT STEP (ProcessingStep)
 # -------------------------------
-step_register = RegisterModel(
-    name="RegisterCombinedModel",
-    model_data=combined_model_uri,               # combined model.tar.gz
-    image_uri="<YOUR_ECR_CUSTOM_IMAGE>",         # TODO: replace
-    content_types=["application/json"],
-    response_types=["application/json"],
-    inference_instances=["ml.m5.xlarge"],
-    transform_instances=["ml.m5.xlarge"],
-    model_package_group_name="MultiTargetXGB-Custom",
-    approval_status="PendingManualApproval",
-    # no explicit sagemaker_session here; it will use the pipeline session
+MODEL_NAME = f"{PROJECT_PREFIX}-custom-model"
+ENDPOINT_CONFIG_NAME = f"{PROJECT_PREFIX}-custom-config"
+ENDPOINT_NAME = f"{PROJECT_PREFIX}-custom-endpoint"
+INSTANCE_TYPE = "ml.m5.xlarge"
+INSTANCE_COUNT = 1
+CUSTOM_IMAGE_URI = "<YOUR_ECR_CUSTOM_IMAGE>"  # TODO: replace
+
+deploy_processor = ScriptProcessor(
+    image_uri=sagemaker.image_uris.retrieve("sklearn", region, version="1.2-1"),
+    role=role,
+    command=["python3"],
+    instance_type="ml.m5.xlarge",
+    instance_count=1,
+)
+
+step_deploy = ProcessingStep(
+    name="DeployEndpoint",
+    processor=deploy_processor,
+    code="deploy_endpoint.py",
+    inputs=[],   # no S3 inputs needed
+    outputs=[],  # no outputs; just side-effect: model + endpoint
+    job_arguments=[
+        "--model_name", MODEL_NAME,
+        "--endpoint_config_name", ENDPOINT_CONFIG_NAME,
+        "--endpoint_name", ENDPOINT_NAME,
+        "--image_uri", CUSTOM_IMAGE_URI,
+        "--model_data", combined_model_uri,
+        "--instance_type", INSTANCE_TYPE,
+        "--instance_count", str(INSTANCE_COUNT),
+    ],
+    depends_on=[step_evaluate],  # ensure evaluation finishes before deploy
 )
 
 # -------------------------------
 # PIPELINE DEFINITION
 # -------------------------------
 pipeline = Pipeline(
-    name="MultiTargetXGBPipeline-LIBSVM-Combined-Eval-Register",
+    name="MultiTargetXGBPipeline-LIBSVM-Combined-Eval-Deploy",
     steps=(
         [step_preprocess]
         + list(train_steps.values())
-        + [step_repack, step_combine, step_evaluate, step_register]
+        + [step_repack, step_combine, step_evaluate, step_deploy]
     ),
     sagemaker_session=pipeline_session,
 )
 
 pipeline.upsert(role_arn=role)
-print("🎉 PIPELINE WITH COMBINE + EVAL + REGISTER CREATED SUCCESSFULLY!")
+print("🎉 PIPELINE WITH DEPLOYMENT STEP CREATED SUCCESSFULLY!")
