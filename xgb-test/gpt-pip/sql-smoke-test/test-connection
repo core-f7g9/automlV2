@@ -1,0 +1,47 @@
+import socket
+
+HOST = "your-sqlserver-hostname-or-private-ip"   # e.g., sqlserver.internal.company.local or 10.0.12.34
+PORT = 1433
+
+print("DNS:", socket.gethostbyname(HOST))
+
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(5)
+try:
+    s.connect((HOST, PORT))
+    print("OK: TCP connection to 1433 succeeded")
+finally:
+    s.close()
+
+
+#####################################################
+
+
+!pip -q install pyodbc
+
+import pyodbc
+
+SERVER = "your-sqlserver-hostname-or-private-ip"
+DATABASE = "YourDb"
+USERNAME = "YourUser"
+PASSWORD = "YourPassword"  # ideally load from Secrets Manager (see below)
+
+conn_str = (
+    "DRIVER={ODBC Driver 18 for SQL Server};"
+    f"SERVER={SERVER};"
+    f"DATABASE={DATABASE};"
+    f"UID={USERNAME};"
+    f"PWD={PASSWORD};"
+    "Encrypt=yes;"
+    "TrustServerCertificate=yes;"  # use proper cert validation in prod
+)
+
+cnxn = pyodbc.connect(conn_str, timeout=5)
+cur = cnxn.cursor()
+
+cur.execute("SELECT @@VERSION;")
+print(cur.fetchone()[0])
+
+cur.close()
+cnxn.close()
+
