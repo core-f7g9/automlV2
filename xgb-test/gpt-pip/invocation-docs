@@ -1,0 +1,124 @@
+#python
+
+import json
+import boto3
+
+region = boto3.Session().region_name
+runtime = boto3.client("sagemaker-runtime", region_name=region)
+
+endpoint_name = "multi-target-xgb-custom-endpoint"
+
+payload = {
+    "target": "DepartmentCode",
+    "instances": [
+        {
+            "VendorName": "ACME SUPPLIES INC",
+            "LineDescription": "Office chairs and desks",
+            "ClubNumber": 123
+        }
+    ]
+}
+
+response = runtime.invoke_endpoint(
+    EndpointName=endpoint_name,
+    ContentType="application/json",
+    Body=json.dumps(payload),
+)
+
+result = json.loads(response["Body"].read().decode("utf-8"))
+print(result)
+
+#Authentication is handled automatically via IAM role / credentials
+
+#2A. Using curl with AWS SigV4 (for testing)
+#If AWS CLI credentials are configured:
+
+aws sagemaker-runtime invoke-endpoint \
+  --endpoint-name multi-target-xgb-custom-endpoint \
+  --content-type application/json \
+  --body file://payload.json \
+  output.json
+
+Where payload.json contains:
+{
+  "target": "DepartmentCode",
+  "instances": [
+    {
+      "VendorName": "ACME SUPPLIES INC",
+      "LineDescription": "Office chairs and desks",
+      "ClubNumber": 123
+    }
+  ]
+}
+This is effectively the CLI equivalent of the SDK call.
+
+NuGet package
+dotnet add package AWSSDK.SageMakerRuntime
+IAM permissions
+The calling service/identity must have:
+"sagemaker:InvokeEndpoint"
+on the target endpoint.
+Endpoint Details
+Endpoint name: multi-target-xgb-custom-endpoint
+Content-Type: application/json
+C# Example (Recommended / Production)
+using System;
+using System.Text;
+using System.Text.Json;
+using System.Threading.Tasks;
+using Amazon;
+using Amazon.SageMakerRuntime;
+using Amazon.SageMakerRuntime.Model;
+
+class SageMakerInvokeExample
+{
+    static async Task Main()
+    {
+        var region = RegionEndpoint.USEast1; // change if needed
+
+        var client = new AmazonSageMakerRuntimeClient(region);
+
+        var payload = new
+        {
+            target = "DepartmentCode",
+            instances = new[]
+            {
+                new
+                {
+                    VendorName = "ACME SUPPLIES INC",
+                    LineDescription = "Office chairs and desks",
+                    ClubNumber = 123
+                }
+            }
+        };
+
+        string jsonPayload = JsonSerializer.Serialize(payload);
+
+        var request = new InvokeEndpointRequest
+        {
+            EndpointName = "multi-target-xgb-custom-endpoint",
+            ContentType = "application/json",
+            Body = new System.IO.MemoryStream(Encoding.UTF8.GetBytes(jsonPayload))
+        };
+
+        InvokeEndpointResponse response = await client.InvokeEndpointAsync(request);
+
+        string responseBody;
+        using (var reader = new System.IO.StreamReader(response.Body))
+        {
+            responseBody = await reader.ReadToEndAsync();
+        }
+
+        Console.WriteLine(responseBody);
+    }
+}
+Expected Response
+{
+  "target": "DepartmentCode",
+  "predictions": [
+    {
+      "prediction": "12345",
+      "probabilities": [0.02, 0.91, 0.03, ...]
+    }
+  ]
+}
