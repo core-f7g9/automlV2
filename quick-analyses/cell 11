@@ -1,0 +1,95 @@
+# Better sentiment than VADER: Amazon Comprehend (managed sentiment)
+# What it does:
+# 1) Calls Comprehend batch sentiment on ticket text (fast baseline)
+# 2) Aggregates sentiment and "upset rate" by embedding-based theme
+# Why:
+# Comprehend sentiment is generally more robust than rule-based VADER for enterprise ticket text.
+
+import boto3
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+region = boto3.Session().region_name
+comprehend = boto3.client("comprehend", region_name=region)
+
+# Comprehend limits: each document <= 5,000 bytes
+def truncate_for_comprehend(s: str, limit_bytes: int = 4900) -> str:
+    if s is None:
+        return ""
+    b = s.encode("utf-8", errors="ignore")
+    if len(b) <= limit_bytes:
+        return s
+    return b[:limit_bytes].decode("utf-8", errors="ignore")
+
+texts = work_emb["text"].fillna("").map(truncate_for_comprehend).tolist()
+
+labels = []
+neg_scores = []
+
+BATCH = 25  # Comprehend batch limit
+for i in range(0, len(texts), BATCH):
+    batch = texts[i:i+BATCH]
+    resp = comprehend.batch_detect_sentiment(TextList=batch, LanguageCode="en")
+    # Comprehend returns results in the same order; errors are separate
+    # We'll default errors to NEUTRAL
+    tmp = ["NEUTRAL"] * len(batch)
+    tmp_neg = [0.0] * len(batch)
+
+    for r in resp.get("ResultList", []):
+        idx = r["Index"]
+        tmp[idx] = r["Sentiment"]
+        tmp_neg[idx] = float(r["SentimentScore"]["Negative"])
+
+    # (Optional) handle errors explicitly
+    for e in resp.get("ErrorList", []):
+        idx = e["Index"]
+        tmp[idx] = "NEUTRAL"
+        tmp_neg[idx] = 0.0
+
+    labels.extend(tmp)
+    neg_scores.extend(tmp_neg)
+
+work_emb["sentiment_label"] = labels
+work_emb["sentiment_negative_score"] = neg_scores
+
+# Define "upset" as high Negative score (more granular than just label)
+UPSET_NEG_SCORE = 0.70
+work_emb["is_upset_comprehend"] = work_emb["sentiment_negative_score"] >= UPSET_NEG_SCORE
+
+# Plot sentiment label distribution overall
+plt.figure()
+work_emb["sentiment_label"].value_counts().plot(kind="bar")
+plt.title("Comprehend sentiment labels (overall)")
+plt.xlabel("Sentiment")
+plt.ylabel("Tickets")
+plt.show()
+
+# Aggregate by embedding theme
+theme_sent = (
+    work_emb.groupby("theme_cluster_emb")
+    .agg(
+        tickets=("theme_cluster_emb", "size"),
+        upset_rate=("is_upset_comprehend", "mean"),
+        avg_neg_score=("sentiment_negative_score", "mean")
+    )
+    .reset_index()
+    .sort_values(["upset_rate", "tickets"], ascending=[False, False])
+)
+
+# Plot tickets per theme (embedding themes)
+plt.figure()
+work_emb["theme_cluster_emb"].value_counts().sort_index().plot(kind="bar")
+plt.title("Number of cases per theme (Embedding-based)")
+plt.xlabel("Theme (cluster id)")
+plt.ylabel("Tickets")
+plt.show()
+
+print("Comprehend sentiment by embedding theme (top 15 by upset_rate):")
+display(theme_sent.head(15))
+
+print("\nMost upset examples (highest negative score):")
+display(
+    work_emb.sort_values("sentiment_negative_score", ascending=False)
+            .head(10)[["Subject", "sentiment_label", "sentiment_negative_score", "theme_cluster_emb"]]
+)
