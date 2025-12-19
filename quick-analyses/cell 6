@@ -1,0 +1,24 @@
+import numpy as np
+
+terms = np.array(tfidf.get_feature_names_out())
+centroids = km.cluster_centers_
+topn = 10
+
+cluster_labels = {}
+for i in range(K):
+    top_idx = centroids[i].argsort()[::-1][:topn]
+    cluster_labels[i] = ", ".join(terms[top_idx])
+
+cluster_labels
+
+
+work["theme_keywords"] = work["theme_cluster"].map(cluster_labels)
+
+work[["theme_cluster","theme_keywords"]].value_counts().head(20)
+
+
+plt.figure()
+work["theme_cluster"].value_counts().sort_values(ascending=False).plot(kind="bar")
+plt.title("Theme clusters (KMeans)")
+plt.ylabel("Tickets")
+plt.show()

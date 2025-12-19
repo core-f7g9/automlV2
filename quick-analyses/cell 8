@@ -1,0 +1,16 @@
+import re
+
+def email_domain(email):
+    if pd.isna(email): 
+        return None
+    email = str(email).strip().lower()
+    m = re.search(r"@([a-z0-9\.\-]+)$", email)
+    return m.group(1) if m else None
+
+work["email_domain"] = work[EMAIL_COL].map(email_domain)
+
+# Heuristic: treat internal company domains as non-vendor
+INTERNAL_DOMAINS = {"yourcompany.com"}  # update
+work["source_guess"] = np.where(work["email_domain"].isin(INTERNAL_DOMAINS), "internal", "external")
+
+work["source_guess"].value_counts(dropna=False)

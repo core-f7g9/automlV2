@@ -1,0 +1,32 @@
+import numpy as np
+
+# Standardize column names (optional)
+df.columns = [c.strip() for c in df.columns]
+
+# Adjust these names to your export
+SUBJECT_COL = "Subject"
+DESC_COL = "Description"
+RES_COL = "Resolution"
+OPEN_COL = "Date/Time opened"
+CLOSE_COL = "Date/Time closed"
+EMAIL_COL = "Web Email"
+ORIGIN_COL = "Case origin"
+TYPE_COL = "Type"
+STATUS_COL = "Status"
+
+def safe_str(x):
+    if pd.isna(x):
+        return ""
+    return str(x)
+
+df["text"] = (df[SUBJECT_COL].map(safe_str) + "\n" + df[DESC_COL].map(safe_str)).str.strip()
+
+df["opened_at"] = pd.to_datetime(df[OPEN_COL], errors="coerce")
+df["closed_at"] = pd.to_datetime(df[CLOSE_COL], errors="coerce")
+
+# Basic duration proxy
+df["open_hours"] = (df["closed_at"] - df["opened_at"]).dt.total_seconds() / 3600.0
+
+df = df[df["text"].str.len() > 0].copy()
+df.shape
+

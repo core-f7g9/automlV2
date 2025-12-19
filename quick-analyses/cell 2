@@ -1,0 +1,13 @@
+import pandas as pd
+
+xlsx_path = "salesforce_cases.xlsx"  # change to your file name
+df = pd.read_excel(xlsx_path, sheet_name=0, engine="openpyxl")
+
+# Save CSV (useful if you later load into Athena/QuickSight)
+csv_path = "salesforce_cases.csv"
+df.to_csv(csv_path, index=False)
+
+df.shape, df.columns
+
+df.head(3)
+df.isna().mean().sort_values(ascending=False).head(15)

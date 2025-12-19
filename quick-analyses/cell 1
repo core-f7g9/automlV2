@@ -1,0 +1,5 @@
+%pip -q install openpyxl pandas numpy matplotlib scikit-learn scipy tqdm nltk spacy
+%pip -q install vaderSentiment
+
+# Optional for embedding-based clustering
+%pip -q install sentence-transformers umap-learn hdbscan

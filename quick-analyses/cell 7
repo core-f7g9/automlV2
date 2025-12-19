@@ -1,0 +1,23 @@
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+
+analyzer = SentimentIntensityAnalyzer()
+
+def vader_compound(text: str) -> float:
+    return analyzer.polarity_scores(text)["compound"]
+
+work["sentiment_compound"] = work["text"].map(vader_compound)
+
+# “Upsetness” proxy: negative compound < -0.5 (tune threshold)
+work["is_upset"] = work["sentiment_compound"] < -0.5
+
+work["sentiment_compound"].describe()
+
+plt.figure()
+work["sentiment_compound"].plot(kind="hist", bins=50)
+plt.title("Sentiment distribution (VADER compound)")
+plt.xlabel("compound sentiment")
+plt.show()
+
+
+cols_to_show = [EMAIL_COL, TYPE_COL, ORIGIN_COL, SUBJECT_COL, "sentiment_compound", "theme_keywords"]
+work.sort_values("sentiment_compound").head(10)[cols_to_show]

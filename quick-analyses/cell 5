@@ -1,0 +1,17 @@
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.cluster import KMeans
+
+# Use a sample if performance is tight; 10k is usually OK
+work = df.sample(min(10000, len(df)), random_state=42).copy()
+
+tfidf = TfidfVectorizer(
+    max_features=20000,
+    stop_words="english",
+    ngram_range=(1,2),
+    min_df=3
+)
+X = tfidf.fit_transform(work["text"])
+
+K = 12  # start with 10-20; adjust quickly
+km = KMeans(n_clusters=K, random_state=42, n_init="auto")
+work["theme_cluster"] = km.fit_predict(X)

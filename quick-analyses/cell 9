@@ -1,0 +1,13 @@
+work["opened_date"] = work["opened_at"].dt.date
+
+theme_daily = work.groupby(["opened_date","theme_cluster"]).size().reset_index(name="count")
+
+# Pivot for plotting
+pivot = theme_daily.pivot(index="opened_date", columns="theme_cluster", values="count").fillna(0)
+
+plt.figure()
+pivot.plot(legend=False)
+plt.title("Theme volume over time (by cluster)")
+plt.xlabel("Date")
+plt.ylabel("Tickets")
+plt.show()

@@ -1,0 +1,27 @@
+import matplotlib.pyplot as plt
+
+# Volume over time
+daily = df.groupby(df["opened_at"].dt.date).size()
+
+plt.figure()
+daily.plot(kind="line")
+plt.title("Ticket volume over time (daily)")
+plt.xlabel("Date")
+plt.ylabel("Tickets")
+plt.show()
+
+# Top Types
+plt.figure()
+df[TYPE_COL].fillna("(blank)").value_counts().head(15).plot(kind="bar")
+plt.title("Top ticket Types (first 15)")
+plt.ylabel("Count")
+plt.show()
+
+# Origins
+plt.figure()
+df[ORIGIN_COL].fillna("(blank)").value_counts().plot(kind="bar")
+plt.title("Case origin distribution")
+plt.ylabel("Count")
+plt.show()
+
+(df["open_hours"].fillna(0) == 0).mean(), df["open_hours"].describe()
