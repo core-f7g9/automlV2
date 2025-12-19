@@ -1,3 +1,9 @@
+# Sentiment analysis (fast feasibility pass) using VADER
+# Goal: create a simple "upsetness" proxy and summarize it by theme.
+
+%pip -q install vaderSentiment
+
+import matplotlib.pyplot as plt
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 analyzer = SentimentIntensityAnalyzer()
@@ -5,19 +11,38 @@ analyzer = SentimentIntensityAnalyzer()
 def vader_compound(text: str) -> float:
     return analyzer.polarity_scores(text)["compound"]
 
-work["sentiment_compound"] = work["text"].map(vader_compound)
+# Compute sentiment score per ticket (compound in [-1, +1])
+work_df["sentiment_compound"] = work_df["text"].map(vader_compound)
 
-# “Upsetness” proxy: negative compound < -0.5 (tune threshold)
-work["is_upset"] = work["sentiment_compound"] < -0.5
+# Define an "upset" flag (tune threshold later; this is a reasonable starting point)
+UPSET_THRESHOLD = -0.5
+work_df["is_upset"] = work_df["sentiment_compound"] < UPSET_THRESHOLD
 
-work["sentiment_compound"].describe()
-
+# 1) Visualize sentiment distribution
 plt.figure()
-work["sentiment_compound"].plot(kind="hist", bins=50)
+work_df["sentiment_compound"].plot(kind="hist", bins=50)
 plt.title("Sentiment distribution (VADER compound)")
-plt.xlabel("compound sentiment")
+plt.xlabel("compound sentiment (-1 = most negative, +1 = most positive)")
+plt.ylabel("tickets")
 plt.show()
 
+# 2) Summarize sentiment by theme
+theme_sent = (
+    work_df.groupby("theme_cluster")
+    .agg(
+        tickets=("theme_cluster", "size"),
+        avg_sentiment=("sentiment_compound", "mean"),
+        upset_rate=("is_upset", "mean"),
+    )
+    .reset_index()
+)
 
-cols_to_show = [EMAIL_COL, TYPE_COL, ORIGIN_COL, SUBJECT_COL, "sentiment_compound", "theme_keywords"]
-work.sort_values("sentiment_compound").head(10)[cols_to_show]
+theme_sent["theme_keywords"] = theme_sent["theme_cluster"].map(theme_keywords)
+
+print("Sentiment by theme (sorted by upset_rate, then volume):")
+display(theme_sent.sort_values(["upset_rate", "tickets"], ascending=[False, False]).head(15))
+
+# 3) Show the most negative examples (useful for qualitative validation)
+cols_to_show = [EMAIL_COL, TYPE_COL, ORIGIN_COL, SUBJECT_COL, "sentiment_compound", "theme_cluster"]
+print("\nMost negative tickets (top 10):")
+display(work_df.sort_values("sentiment_compound").head(10)[cols_to_show])
