@@ -1,24 +1,20 @@
 import numpy as np
 
+# Get feature (word/phrase) names
 terms = np.array(tfidf.get_feature_names_out())
-centroids = km.cluster_centers_
-topn = 10
 
-cluster_labels = {}
-for i in range(K):
-    top_idx = centroids[i].argsort()[::-1][:topn]
-    cluster_labels[i] = ", ".join(terms[top_idx])
+# Cluster centers
+centroids = kmeans.cluster_centers_
 
-cluster_labels
+TOP_N = 10  # number of keywords to show per theme
 
+theme_keywords = {}
 
-work["theme_keywords"] = work["theme_cluster"].map(cluster_labels)
+for cluster_id in range(NUM_THEMES):
+    top_indices = centroids[cluster_id].argsort()[::-1][:TOP_N]
+    keywords = terms[top_indices]
+    theme_keywords[cluster_id] = ", ".join(keywords)
 
-work[["theme_cluster","theme_keywords"]].value_counts().head(20)
-
-
-plt.figure()
-work["theme_cluster"].value_counts().sort_values(ascending=False).plot(kind="bar")
-plt.title("Theme clusters (KMeans)")
-plt.ylabel("Tickets")
-plt.show()
+# Display themes
+for cid, kws in theme_keywords.items():
+    print(f"Theme {cid}: {kws}")
