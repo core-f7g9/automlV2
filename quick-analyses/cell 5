@@ -1,17 +1,29 @@
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.cluster import KMeans
 
-# Use a sample if performance is tight; 10k is usually OK
-work = df.sample(min(10000, len(df)), random_state=42).copy()
+# For speed and stability, we work on up to 10k tickets
+work_df = df.sample(min(10000, len(df)), random_state=42).copy()
 
+# Convert text into numeric vectors
 tfidf = TfidfVectorizer(
-    max_features=20000,
     stop_words="english",
-    ngram_range=(1,2),
-    min_df=3
+    ngram_range=(1, 2),   # single words + short phrases
+    min_df=3,             # ignore extremely rare terms
+    max_features=20000
 )
-X = tfidf.fit_transform(work["text"])
 
-K = 12  # start with 10-20; adjust quickly
-km = KMeans(n_clusters=K, random_state=42, n_init="auto")
-work["theme_cluster"] = km.fit_predict(X)
+X = tfidf.fit_transform(work_df["text"])
+
+# Choose number of themes (start simple)
+NUM_THEMES = 12
+
+kmeans = KMeans(
+    n_clusters=NUM_THEMES,
+    random_state=42,
+    n_init="auto"
+)
+
+work_df["theme_cluster"] = kmeans.fit_predict(X)
+
+print("Theme cluster counts:")
+print(work_df["theme_cluster"].value_counts().sort_index())
