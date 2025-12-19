@@ -1,0 +1,31 @@
+import matplotlib.pyplot as plt
+import numpy as np
+from sklearn.metrics.pairwise import cosine_distances
+
+# 1) Plot number of cases per embedding-based theme
+counts = work_emb["theme_cluster_emb"].value_counts().sort_index()
+
+plt.figure()
+counts.plot(kind="bar")
+plt.title("Number of cases per theme (Embedding-based)")
+plt.xlabel("Theme (cluster id)")
+plt.ylabel("Number of cases")
+plt.show()
+
+# 2) Show representative examples per theme
+print("\nRepresentative examples per theme:\n")
+
+centers = kmeans_emb.cluster_centers_
+
+for theme_id in range(NUM_THEMES_EMB):
+    theme_mask = work_emb["theme_cluster_emb"] == theme_id
+    theme_vectors = embeddings[theme_mask]
+    theme_rows = work_emb[theme_mask]
+
+    # Distance to cluster center
+    dists = cosine_distances(theme_vectors, centers[theme_id].reshape(1, -1)).flatten()
+    closest_idx = np.argsort(dists)[:3]  # top 3 examples
+
+    print(f"\n=== Theme {theme_id} (count={counts.get(theme_id, 0)}) ===")
+    for i in closest_idx:
+        print("-", theme_rows.iloc[i]["Subject"])
