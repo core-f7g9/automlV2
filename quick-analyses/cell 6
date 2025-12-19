@@ -18,3 +18,14 @@ for cluster_id in range(NUM_THEMES):
 # Display themes
 for cid, kws in theme_keywords.items():
     print(f"Theme {cid}: {kws}")
+
+import matplotlib.pyplot as plt
+
+counts = work_df["theme_cluster"].value_counts().sort_index()
+
+plt.figure()
+counts.plot(kind="bar")
+plt.title("Number of cases per theme (cluster)")
+plt.xlabel("Theme (cluster id)")
+plt.ylabel("Number of cases")
+plt.show()
