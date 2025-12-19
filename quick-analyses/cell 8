@@ -1,16 +1,60 @@
-import re
+# Incident / spike detection by theme over time
+# Goal: identify dates where a specific theme suddenly spikes (proxy for incidents)
 
-def email_domain(email):
-    if pd.isna(email): 
-        return None
-    email = str(email).strip().lower()
-    m = re.search(r"@([a-z0-9\.\-]+)$", email)
-    return m.group(1) if m else None
+import matplotlib.pyplot as plt
 
-work["email_domain"] = work[EMAIL_COL].map(email_domain)
+# Ensure we have a date (not datetime) for grouping
+work_df["opened_date"] = work_df["opened_at"].dt.date
 
-# Heuristic: treat internal company domains as non-vendor
-INTERNAL_DOMAINS = {"yourcompany.com"}  # update
-work["source_guess"] = np.where(work["email_domain"].isin(INTERNAL_DOMAINS), "internal", "external")
+# Count tickets per (date, theme)
+daily_theme_counts = (
+    work_df
+    .groupby(["opened_date", "theme_cluster"])
+    .size()
+    .reset_index(name="count")
+)
 
-work["source_guess"].value_counts(dropna=False)
+# Pivot to date x theme matrix
+pivot = (
+    daily_theme_counts
+    .pivot(index="opened_date", columns="theme_cluster", values="count")
+    .fillna(0)
+)
+
+# Plot all themes over time (spike patterns)
+plt.figure()
+pivot.plot(legend=False)
+plt.title("Ticket volume by theme over time")
+plt.xlabel("Date")
+plt.ylabel("Number of tickets")
+plt.show()
+
+# Simple statistical spike detection (z-score per theme)
+spikes = []
+
+for theme_id in pivot.columns:
+    series = pivot[theme_id]
+    mean = series.mean()
+    std = series.std()
+
+    if std == 0:
+        continue
+
+    zscores = (series - mean) / std
+    spike_days = zscores[zscores >= 3]  # 3-sigma rule
+
+    for day, z in spike_days.items():
+        spikes.append({
+            "theme_cluster": theme_id,
+            "theme_keywords": theme_keywords.get(theme_id),
+            "date": day,
+            "count": int(series.loc[day]),
+            "zscore": round(float(z), 2)
+        })
+
+spike_df = pd.DataFrame(spikes).sort_values(
+    ["zscore", "count"], ascending=False
+)
+
+print("Detected potential incident spikes:")
+display(spike_df.head(20))
