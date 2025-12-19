@@ -1,13 +1,40 @@
-work["opened_date"] = work["opened_at"].dt.date
+# Embeddings-based clustering (semantic themes)
+# What this does:
+# 1) Generates an embedding (meaning vector) per ticket using a pretrained sentence model
+# 2) Clusters embeddings into NUM_THEMES_EMB groups (themes)
+# Why:
+# TF-IDF clusters by shared words; embeddings cluster by meaning (better with synonyms / varied phrasing)
 
-theme_daily = work.groupby(["opened_date","theme_cluster"]).size().reset_index(name="count")
+%pip -q install sentence-transformers
 
-# Pivot for plotting
-pivot = theme_daily.pivot(index="opened_date", columns="theme_cluster", values="count").fillna(0)
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.cluster import KMeans
 
-plt.figure()
-pivot.plot(legend=False)
-plt.title("Theme volume over time (by cluster)")
-plt.xlabel("Date")
-plt.ylabel("Tickets")
-plt.show()
+# Work on a manageable sample for speed (raise to 10000 if it runs fast enough)
+work_emb = df.sample(min(8000, len(df)), random_state=42).copy()
+
+# Create text if not already present (safe if it exists)
+if "text" not in work_emb.columns:
+    SUBJECT_COL = "Subject"
+    DESC_COL = "Description"
+    def safe_str(x): return "" if pd.isna(x) else str(x)
+    work_emb["text"] = (work_emb[SUBJECT_COL].map(safe_str) + "\n" + work_emb[DESC_COL].map(safe_str)).str.strip()
+    work_emb = work_emb[work_emb["text"].str.len() > 0].copy()
+
+# 1) Generate embeddings (normalized for better KMeans behavior)
+embed_model = SentenceTransformer("all-MiniLM-L6-v2")  # fast, strong baseline
+embeddings = embed_model.encode(
+    work_emb["text"].tolist(),
+    batch_size=64,
+    show_progress_bar=True,
+    normalize_embeddings=True
+)
+
+# 2) Cluster embeddings into themes
+NUM_THEMES_EMB = 12
+kmeans_emb = KMeans(n_clusters=NUM_THEMES_EMB, random_state=42, n_init="auto")
+work_emb["theme_cluster_emb"] = kmeans_emb.fit_predict(embeddings)
+
+print("Embedding theme cluster counts:")
+print(work_emb["theme_cluster_emb"].value_counts().sort_index())
