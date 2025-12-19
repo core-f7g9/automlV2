@@ -11,3 +11,39 @@ df.shape, df.columns
 
 df.head(3)
 df.isna().mean().sort_values(ascending=False).head(15)
+
+
+
+# Missingness check for key fields
+key_fields = [
+    "text",
+    "opened_at",
+    "closed_at",
+    "open_hours",
+    EMAIL_COL,
+    TYPE_COL,
+    ORIGIN_COL
+]
+
+missing = (
+    df[key_fields]
+    .isna()
+    .mean()
+    .sort_values(ascending=False)
+)
+
+print("Fraction missing per key field:")
+print(missing)
+
+# Text length distribution
+df["text_length"] = df["text"].str.len()
+
+print("\nText length summary:")
+print(df["text_length"].describe())
+
+# Open duration sanity
+print("\nOpen hours summary:")
+print(df["open_hours"].describe())
+
+print("\nFraction of tickets with open_hours == 0:")
+print((df["open_hours"].fillna(0) == 0).mean())
