@@ -1,0 +1,39 @@
+%pip -q install boto3 pandas numpy scikit-learn tqdm matplotlib
+
+# Bedrock embeddings-only path (configurable)
+import json
+import boto3
+import numpy as np
+import pandas as pd
+from tqdm.auto import tqdm
+
+# --- Parameters (tune here) ---
+EMBED_MODEL_ID = "cohere.embed-english-v3"  # Bedrock embedding model
+NUM_THEMES = 12                             # number of clusters/themes
+BATCH_SIZE = 32                             # embedding batch size (Cohere supports batching)
+MAX_TEXT_CHARS = 6000                       # truncate long tickets for embedding
+SUBJECT_COL = "Subject"
+DESC_COL = "Description"
+# ------------------------------
+
+
+def safe_str(x):
+    return "" if pd.isna(x) else str(x)
+
+
+def truncate_text(s: str, limit: int = MAX_TEXT_CHARS) -> str:
+    return safe_str(s).replace("\n", " ").strip()[:limit]
+
+
+# Ensure a combined text field exists
+if "text" not in df.columns:
+    df["text"] = (
+        df[SUBJECT_COL].map(safe_str)
+        + "\n"
+        + df[DESC_COL].map(safe_str)
+    ).str.strip()
+
+# Prepare texts for embedding (all records, truncated)
+texts_ready = df["text"].fillna("").map(lambda x: truncate_text(x)).tolist()
+
+print(f"Prepared {len(texts_ready):,} tickets for embedding with {EMBED_MODEL_ID}.")

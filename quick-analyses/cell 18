@@ -1,0 +1,80 @@
+LABEL_MODEL_ID = "anthropic.claude-3-sonnet-20240229-v1:0"
+LABEL_EXAMPLES_PER_THEME = 12
+LABEL_MAX_CHARS = 1200
+
+
+def invoke_claude(prompt: str) -> str:
+    body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 150,
+        "temperature": 0.0,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ]
+    }
+
+    resp = brt.invoke_model(
+        modelId=LABEL_MODEL_ID,
+        body=json.dumps(body),
+        accept="application/json",
+        contentType="application/json",
+    )
+
+    payload = json.loads(resp["body"].read())
+    return payload["content"][0]["text"].strip()
+
+
+rows = []
+centers = kmeans_bedrock.cluster_centers_
+
+for theme_id in range(NUM_THEMES):
+    mask = df["theme_cluster_bedrock"] == theme_id
+    if mask.sum() == 0:
+        continue
+
+    theme_vectors = embeddings[mask]
+    theme_rows = df.loc[mask]
+
+    # closest examples to cluster center
+    dists = cosine_distances(
+        theme_vectors,
+        centers[theme_id].reshape(1, -1)
+    ).flatten()
+
+    top_idx = np.argsort(dists)[:LABEL_EXAMPLES_PER_THEME]
+    reps = theme_rows.iloc[top_idx]
+
+    examples = []
+    for _, r in reps.iterrows():
+        example_text = (
+            f"Subject: {r.get(SUBJECT_COL, '')}\n"
+            f"Ticket: {r.get('text', '')}"
+        )
+        examples.append(truncate_text(example_text, LABEL_MAX_CHARS))
+
+    prompt = f"""
+You are labeling a cluster of support tickets.
+
+Return ONE concise theme label (3-7 words).
+Use business-friendly language.
+No punctuation. No explanations.
+Return ONLY the label text.
+
+Ticket examples:
+----------------
+{chr(10).join(examples)}
+""".strip()
+
+    try:
+        label = invoke_claude(prompt)
+    except Exception as e:
+        label = f"(error: {str(e)})"
+
+    rows.append({
+        "theme_cluster_bedrock": theme_id,
+        "tickets": int(mask.sum()),
+        "label": label
+    })
+
+label_df = pd.DataFrame(rows).sort_values("tickets", ascending=False)
+display(label_df)
