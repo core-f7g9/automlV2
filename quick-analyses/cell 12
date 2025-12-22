@@ -1,0 +1,53 @@
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_distances
+import numpy as np
+import pandas as pd
+
+THEME_LABEL_TOP_K = 5     # keywords per theme
+REPRESENTATIVE_N = 25    # tickets per theme to extract keywords from
+
+theme_labels_emb = {}
+
+rows = []
+
+for theme_id in range(NUM_THEMES_EMB):
+    mask = work_emb["theme_cluster_emb"] == theme_id
+    theme_texts = work_emb.loc[mask, "text"]
+
+    if len(theme_texts) == 0:
+        continue
+
+    # --- find representative samples ---
+    theme_vectors = embeddings[mask]
+    center = kmeans_emb.cluster_centers_[theme_id].reshape(1, -1)
+    dists = cosine_distances(theme_vectors, center).flatten()
+
+    top_idx = np.argsort(dists)[:REPRESENTATIVE_N]
+    rep_texts = theme_texts.iloc[top_idx]
+
+    # --- extract keywords using TF-IDF on representative texts ---
+    tfidf = TfidfVectorizer(
+        stop_words="english",
+        ngram_range=(1, 2),
+        min_df=2,
+        max_features=2000
+    )
+    X = tfidf.fit_transform(rep_texts)
+    terms = np.array(tfidf.get_feature_names_out())
+
+    weights = X.mean(axis=0).A1
+    top_terms = terms[np.argsort(weights)[::-1][:THEME_LABEL_TOP_K]]
+
+    label = ", ".join(top_terms)
+    theme_labels_emb[theme_id] = label
+
+    rows.append({
+        "theme_cluster": theme_id,
+        "label": label,
+        "tickets": int(mask.sum())
+    })
+
+theme_label_df = pd.DataFrame(rows).sort_values("tickets", ascending=False)
+
+print("Embedding-based theme labels:")
+display(theme_label_df)
