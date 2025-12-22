@@ -1,0 +1,97 @@
+import boto3, json, numpy as np, pandas as pd
+from sklearn.metrics.pairwise import cosine_distances
+
+# --------- CONFIG ----------
+MODEL_ID = "amazon.titan-text-express-v1"   # common + affordable; change if needed
+REPRESENTATIVE_N = 8                       # how many tickets per theme to show the LLM
+MAX_SUBJECT_CHARS = 140                    # keep prompt compact
+# ---------------------------
+
+brt = boto3.client("bedrock-runtime", region_name=boto3.Session().region_name)
+
+def truncate(s, n):
+    s = "" if s is None else str(s).replace("\n", " ").strip()
+    return (s[:n] + "…") if len(s) > n else s
+
+def bedrock_invoke_titan(prompt: str) -> str:
+    body = {
+        "inputText": prompt,
+        "textGenerationConfig": {
+            "maxTokenCount": 350,
+            "temperature": 0.2,
+            "topP": 0.9
+        }
+    }
+    resp = brt.invoke_model(
+        modelId=MODEL_ID,
+        body=json.dumps(body),
+        accept="application/json",
+        contentType="application/json",
+    )
+    out = json.loads(resp["body"].read())
+    # Titan returns: {"results":[{"outputText":"..."}]}
+    return out["results"][0]["outputText"]
+
+labels = []
+
+centers = kmeans_emb.cluster_centers_
+
+# Ensure Subject column exists; if yours is different, change this:
+SUBJECT_COL = "Subject"
+
+for theme_id in range(NUM_THEMES_EMB):
+    mask = work_emb["theme_cluster_emb"] == theme_id
+    if mask.sum() == 0:
+        continue
+
+    theme_vectors = embeddings[mask]
+    theme_rows = work_emb.loc[mask].copy()
+
+    dists = cosine_distances(theme_vectors, centers[theme_id].reshape(1, -1)).flatten()
+    top_idx = np.argsort(dists)[:REPRESENTATIVE_N]
+    reps = theme_rows.iloc[top_idx]
+
+    # Provide compact examples to the LLM
+    examples = []
+    for _, r in reps.iterrows():
+        subj = truncate(r.get(SUBJECT_COL, ""), MAX_SUBJECT_CHARS)
+        examples.append(f"- {subj}")
+
+    prompt = f"""
+You are labeling a support-ticket theme cluster.
+Given these representative ticket subjects, produce a clear business-friendly theme label.
+
+Requirements:
+- Return ONLY valid JSON (no backticks, no extra text).
+- label: 3-6 words, Title Case
+- description: 1 sentence, plain English
+- keywords: 3-6 short keywords/phrases
+- confidence: one of ["low","medium","high"]
+
+Ticket subjects:
+{chr(10).join(examples)}
+
+Return JSON with keys: label, description, keywords, confidence.
+""".strip()
+
+    try:
+        raw = bedrock_invoke_titan(prompt).strip()
+        # In case the model adds leading text, try to extract JSON block
+        start = raw.find("{")
+        end = raw.rfind("}")
+        parsed = json.loads(raw[start:end+1]) if start != -1 and end != -1 else {"label":"(parse_failed)","description":raw[:200],"keywords":[],"confidence":"low"}
+    except Exception as e:
+        parsed = {"label":"(error)","description":str(e),"keywords":[],"confidence":"low"}
+
+    labels.append({
+        "theme_cluster_emb": theme_id,
+        "tickets": int(mask.sum()),
+        "label": parsed.get("label"),
+        "confidence": parsed.get("confidence"),
+        "keywords": ", ".join(parsed.get("keywords", [])) if isinstance(parsed.get("keywords", []), list) else str(parsed.get("keywords")),
+        "description": parsed.get("description"),
+        "examples": " | ".join([truncate(x, 80) for x in reps[SUBJECT_COL].fillna("").astype(str).tolist()[:3]])
+    })
+
+label_df = pd.DataFrame(labels).sort_values(["tickets"], ascending=False)
+display(label_df)
