@@ -16,11 +16,15 @@ def truncate(s, n):
 
 def invoke_claude(prompt: str) -> str:
     body = {
-        "messages": [
-            {"role": "user", "content": prompt}
-        ],
+        "anthropic_version": "bedrock-2023-05-31",
         "max_tokens": 120,
-        "temperature": 0.0
+        "temperature": 0.0,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
     }
 
     resp = brt.invoke_model(
@@ -29,8 +33,9 @@ def invoke_claude(prompt: str) -> str:
         accept="application/json",
         contentType="application/json",
     )
-    out = json.loads(resp["body"].read())
-    return out["content"][0]["text"].strip()
+
+    payload = json.loads(resp["body"].read())
+    return payload["content"][0]["text"].strip()
 
 rows = []
 centers = kmeans_emb.cluster_centers_
@@ -62,11 +67,10 @@ for theme_id in range(NUM_THEMES_EMB):
     prompt = f"""
 You are labeling a cluster of support tickets.
 
-Task:
-- Return ONE concise theme label (3–7 words)
-- Use business-friendly language
-- No punctuation, no explanations
-- Return ONLY the label text
+Return ONE concise theme label (3–7 words).
+Use business-friendly language.
+No punctuation. No explanations.
+Return ONLY the label text.
 
 Ticket examples:
 ----------------
