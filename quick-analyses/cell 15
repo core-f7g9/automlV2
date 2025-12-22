@@ -11,7 +11,8 @@ from tqdm.auto import tqdm
 EMBED_MODEL_ID = "cohere.embed-english-v3"  # Bedrock embedding model
 NUM_THEMES = 12                             # number of clusters/themes
 BATCH_SIZE = 32                             # embedding batch size (Cohere supports batching)
-MAX_TEXT_CHARS = 6000                       # truncate long tickets for embedding
+# Cohere embeds require <= 2048 chars; use a safety margin
+MAX_TEXT_CHARS = 1800
 SUBJECT_COL = "Subject"
 DESC_COL = "Description"
 # ------------------------------

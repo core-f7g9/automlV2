@@ -5,6 +5,8 @@ brt = boto3.client("bedrock-runtime", region_name=boto3.Session().region_name)
 
 
 def embed_batch_cohere(texts):
+    # Hard truncate within the batch to guard against residual long texts
+    texts = [t[:MAX_TEXT_CHARS] for t in texts]
     body = {
         "texts": texts,
         "input_type": "search_document",
