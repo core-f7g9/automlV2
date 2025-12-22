@@ -1,10 +1,10 @@
-import boto3, numpy as np, pandas as pd
+import boto3, json, numpy as np, pandas as pd
 from sklearn.metrics.pairwise import cosine_distances
 
 # -------- CONFIG --------
-MODEL_ID = "anthropic.claude-3-haiku-20240307-v1:0"  # very reliable for instruction following
-REPRESENTATIVE_N = 6                                # full tickets are OK
-MAX_TEXT_CHARS = 1200                               # plenty of context
+MODEL_ID = "anthropic.claude-3-haiku-20240307-v1:0"
+REPRESENTATIVE_N = 6
+MAX_TEXT_CHARS = 1200
 SUBJECT_COL = "Subject"
 # -----------------------
 
@@ -43,24 +43,30 @@ for theme_id in range(NUM_THEMES_EMB):
     theme_vectors = embeddings[mask]
     theme_rows = work_emb.loc[mask]
 
-    dists = cosine_distances(theme_vectors, centers[theme_id].reshape(1, -1)).flatten()
+    dists = cosine_distances(
+        theme_vectors,
+        centers[theme_id].reshape(1, -1)
+    ).flatten()
+
     top_idx = np.argsort(dists)[:REPRESENTATIVE_N]
     reps = theme_rows.iloc[top_idx]
 
-    # Build readable examples (full subject + partial description)
     examples = []
     for _, r in reps.iterrows():
-        text = f"Subject: {r.get(SUBJECT_COL,'')}\n{text:=r.get('text','')}"
-        examples.append(truncate(text, MAX_TEXT_CHARS))
+        example_text = (
+            f"Subject: {r.get(SUBJECT_COL, '')}\n"
+            f"Ticket Text: {r.get('text', '')}"
+        )
+        examples.append(truncate(example_text, MAX_TEXT_CHARS))
 
     prompt = f"""
 You are labeling a cluster of support tickets.
 
-Based on the examples below, provide:
-- ONE concise theme label (3–7 words)
+Task:
+- Return ONE concise theme label (3–7 words)
 - Use business-friendly language
-- Do NOT include explanations, bullets, or formatting
-- Just return the label text
+- No punctuation, no explanations
+- Return ONLY the label text
 
 Ticket examples:
 ----------------
