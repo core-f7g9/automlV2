@@ -1,0 +1,64 @@
+import matplotlib.pyplot as plt
+
+# Map cluster -> label if label_df exists
+label_map = {}
+if "label_df" in globals():
+    label_map = dict(zip(label_df["theme_cluster_bedrock"], label_df["label"]))
+
+def theme_name(cid):
+    return label_map.get(cid, f"Theme {cid}")
+
+# Sentiment label distribution
+plt.figure()
+df["sentiment_label_comprehend"].value_counts().plot(kind="bar")
+plt.title("Comprehend sentiment labels (overall)")
+plt.xlabel("Sentiment")
+plt.ylabel("Tickets")
+plt.show()
+
+# Negative score histogram
+plt.figure()
+df["sentiment_negative_score"].plot(kind="hist", bins=40)
+plt.title("Negative sentiment score distribution (Comprehend)")
+plt.xlabel("Negative score (0-1)")
+plt.ylabel("Tickets")
+plt.show()
+
+# Upset rate by theme
+theme_sent = (
+    df.groupby("theme_cluster_bedrock")
+    .agg(
+        tickets=("theme_cluster_bedrock", "size"),
+        upset_rate=("is_upset_comprehend", "mean"),
+        avg_neg_score=("sentiment_negative_score", "mean")
+    )
+    .reset_index()
+    .sort_values(["upset_rate", "tickets"], ascending=[False, False])
+)
+theme_sent["theme_label"] = theme_sent["theme_cluster_bedrock"].map(theme_name)
+
+plt.figure()
+theme_sent.set_index("theme_label")["upset_rate"].plot(kind="bar")
+plt.title("Upset rate by theme (Comprehend)")
+plt.xlabel("Theme")
+plt.ylabel("Upset rate")
+plt.show()
+
+print("Comprehend sentiment by theme (top 15 by upset_rate):")
+display(theme_sent.head(15))
+
+# Top 15 most negative tickets (with contents)
+top_neg = df.sort_values("sentiment_negative_score", ascending=False).head(15)
+
+cols_to_show = [
+    SUBJECT_COL,
+    "text",
+    "sentiment_label_comprehend",
+    "sentiment_negative_score",
+    "theme_cluster_bedrock",
+]
+
+top_neg = top_neg.assign(theme_label=top_neg["theme_cluster_bedrock"].map(theme_name))
+
+print("\nTop 15 most negative tickets:")
+display(top_neg[cols_to_show + ["theme_label"]])

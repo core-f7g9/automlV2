@@ -8,11 +8,12 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 # --- Parameters (tune here) ---
-EMBED_MODEL_ID = "cohere.embed-english-v3"  # Bedrock embedding model
+EMBED_MODEL_ID = "cohere.embed-v4"          # Bedrock embedding model (Cohere Embed v4)
 NUM_THEMES = 12                             # number of clusters/themes
-BATCH_SIZE = 32                             # embedding batch size (Cohere supports batching)
-# Cohere embeds require <= 2048 chars; use a safety margin
-MAX_TEXT_CHARS = 1800
+BATCH_SIZE = 96                             # Embed v4 allows up to 96 items per call
+# v4 supports very long context; keep a practical cap for throughput
+MAX_TEXT_CHARS = 6000
+TRUNCATE_STRATEGY = "RIGHT"                 # Cohere options: NONE | LEFT | RIGHT
 SUBJECT_COL = "Subject"
 DESC_COL = "Description"
 # ------------------------------

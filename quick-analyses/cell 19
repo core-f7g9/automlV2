@@ -1,0 +1,51 @@
+import boto3, json
+
+# --- Parameters (tune here) ---
+COMPREHEND_BATCH = 25
+NEG_UPSET_THRESHOLD = 0.70     # define "upset" via negative score
+COMPREHEND_MAX_BYTES = 4900    # Comprehend doc limit ~5000 bytes
+# ------------------------------
+
+region = boto3.Session().region_name
+comprehend = boto3.client("comprehend", region_name=region)
+
+
+def truncate_for_comprehend(s: str, limit_bytes: int = COMPREHEND_MAX_BYTES) -> str:
+    if s is None:
+        return ""
+    b = str(s).encode("utf-8", errors="ignore")
+    if len(b) <= limit_bytes:
+        return b.decode("utf-8", errors="ignore")
+    return b[:limit_bytes].decode("utf-8", errors="ignore")
+
+
+texts_comprehend = df["text"].fillna("").map(truncate_for_comprehend).tolist()
+
+labels = []
+neg_scores = []
+
+for i in range(0, len(texts_comprehend), COMPREHEND_BATCH):
+    batch = texts_comprehend[i:i+COMPREHEND_BATCH]
+    resp = comprehend.batch_detect_sentiment(TextList=batch, LanguageCode="en")
+
+    tmp_labels = ["NEUTRAL"] * len(batch)
+    tmp_neg = [0.0] * len(batch)
+
+    for r in resp.get("ResultList", []):
+        idx = r["Index"]
+        tmp_labels[idx] = r["Sentiment"]
+        tmp_neg[idx] = float(r["SentimentScore"]["Negative"])
+
+    for e in resp.get("ErrorList", []):
+        idx = e["Index"]
+        tmp_labels[idx] = "NEUTRAL"
+        tmp_neg[idx] = 0.0
+
+    labels.extend(tmp_labels)
+    neg_scores.extend(tmp_neg)
+
+df["sentiment_label_comprehend"] = labels
+df["sentiment_negative_score"] = neg_scores
+df["is_upset_comprehend"] = df["sentiment_negative_score"] >= NEG_UPSET_THRESHOLD
+
+print("Comprehend sentiment complete.")

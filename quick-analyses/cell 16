@@ -5,12 +5,14 @@ brt = boto3.client("bedrock-runtime", region_name=boto3.Session().region_name)
 
 
 def embed_batch_cohere(texts):
-    # Hard truncate within the batch to guard against residual long texts
+    # Hard truncate within the batch for safety/throughput
     texts = [t[:MAX_TEXT_CHARS] for t in texts]
     body = {
         "texts": texts,
         "input_type": "search_document",
-        "truncate": "END"
+        "truncate": TRUNCATE_STRATEGY,  # RIGHT truncation on long inputs
+        # "output_dimension": 1536,     # uncomment to force vector size (256/512/1024/1536)
+        # "embedding_types": ["float"], # default is float; can request int8/uint8/binary/ubinary
     }
     resp = brt.invoke_model(
         modelId=EMBED_MODEL_ID,
