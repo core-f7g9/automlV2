@@ -1,4 +1,4 @@
-import math
+import math, time
 
 # Bedrock embedding client
 brt = boto3.client("bedrock-runtime", region_name=boto3.Session().region_name)
@@ -14,14 +14,22 @@ def embed_batch_cohere(texts):
         # "output_dimension": 1536,     # uncomment to force vector size (256/512/1024/1536)
         # "embedding_types": ["float"], # default is float; can request int8/uint8/binary/ubinary
     }
-    resp = brt.invoke_model(
-        modelId=EMBED_MODEL_ID,
-        body=json.dumps(body),
-        accept="application/json",
-        contentType="application/json",
-    )
-    payload = json.loads(resp["body"].read())
-    return payload["embeddings"]
+    last_err = None
+    for attempt in range(1, EMBED_MAX_RETRIES + 1):
+        try:
+            resp = brt.invoke_model(
+                modelId=EMBED_MODEL_ID,
+                body=json.dumps(body),
+                accept="application/json",
+                contentType="application/json",
+            )
+            payload = json.loads(resp["body"].read())
+            return payload["embeddings"]
+        except Exception as e:
+            last_err = e
+            sleep_s = EMBED_BACKOFF_BASE ** attempt
+            time.sleep(sleep_s)
+    raise RuntimeError(f"Embedding failed after {EMBED_MAX_RETRIES} retries: {last_err}")
 
 
 embeddings = []
