@@ -24,12 +24,23 @@ def embed_batch_cohere(texts):
                 contentType="application/json",
             )
             payload = json.loads(resp["body"].read())
-            return payload["embeddings"]
+            emb = payload.get("embeddings")
+            # Cohere v4 may return dict keyed by embedding type
+            if isinstance(emb, dict):
+                for key in ("float", "int8", "uint8", "binary", "ubinary"):
+                    if key in emb:
+                        emb = emb[key]
+                        break
+            return emb
         except Exception as e:
             last_err = e
             sleep_s = EMBED_BACKOFF_BASE ** attempt
             time.sleep(sleep_s)
     raise RuntimeError(f"Embedding failed after {EMBED_MAX_RETRIES} retries: {last_err}")
+
+
+def embed_single(text):
+    return embed_batch_cohere([text])[0]
 
 
 embeddings = []
@@ -42,7 +53,52 @@ for i in tqdm(range(num_batches), desc="Embedding with Bedrock"):
     batch_embeddings = embed_batch_cohere(batch)
     embeddings.extend(batch_embeddings)
 
-embeddings = np.array(embeddings, dtype=np.float32)
+# Validate/repair embeddings -> float32
+cleaned = [None] * len(embeddings)
+bad = []
+for idx, emb in enumerate(embeddings):
+    try:
+        cleaned[idx] = np.asarray(emb, dtype=np.float32)
+    except Exception as e:
+        bad.append((idx, e))
+
+if bad:
+    print(f"Retrying {len(bad)} embeddings individually due to parse errors...")
+    for idx, err in bad:
+        try:
+            re_emb = embed_single(texts_ready[idx])
+            cleaned[idx] = np.asarray(re_emb, dtype=np.float32)
+        except Exception as e2:
+            raise RuntimeError(f"Embedding parse failed at global index {idx}: {err}; retry error: {e2}")
+
+embeddings = np.vstack(cleaned)
 
 print(f"Embeddings shape: {embeddings.shape} (records x dimensions)")
 assert embeddings.shape[0] == len(df), "Mismatch between embeddings and rows"
+
+
+
+# Use existing `embeddings` and `texts_ready` from the long run
+cleaned, bad = [None] * len(embeddings), []
+for idx, emb in enumerate(embeddings):
+    try:
+        # unwrap dict responses if present
+        if isinstance(emb, dict):
+            for key in ("float", "int8", "uint8", "binary", "ubinary"):
+                if key in emb:
+                    emb = emb[key]
+                    break
+        cleaned[idx] = np.asarray(emb, dtype=np.float32)
+    except Exception as e:
+        bad.append((idx, e))
+
+print(f"Needing retry: {len(bad)}")
+for idx, err in bad:
+    try:
+        re_emb = embed_single(texts_ready[idx])  # uses the single-item helper
+        cleaned[idx] = np.asarray(re_emb, dtype=np.float32)
+    except Exception as e2:
+        raise RuntimeError(f"Embedding parse failed at index {idx}: {err}; retry: {e2}")
+
+embeddings = np.vstack(cleaned)
+print(embeddings.shape)
