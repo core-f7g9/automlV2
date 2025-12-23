@@ -8,7 +8,7 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 # --- Parameters (tune here) ---
-EMBED_MODEL_ID = "cohere.embed-v4"          # Bedrock embedding model (Cohere Embed v4)
+EMBED_MODEL_ID = "cohere.embed-v4:0"          # Bedrock embedding model (Cohere Embed v4)
 NUM_THEMES = 12                             # number of clusters/themes
 BATCH_SIZE = 96                             # Embed v4 allows up to 96 items per call
 # v4 supports very long context; keep a practical cap for throughput
