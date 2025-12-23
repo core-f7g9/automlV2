@@ -4,6 +4,40 @@ import math, time
 brt = boto3.client("bedrock-runtime", region_name=boto3.Session().region_name)
 
 
+def extract_embeddings_from_payload(payload):
+    """
+    Make Cohere v4 responses explicit and fail early if structure is unexpected.
+    Expected shapes:
+      - {"response_type": "embeddings_floats", "embeddings": [[...], ...]}
+      - {"response_type": "embeddings_by_type", "embeddings": {"float": [[...], ...]}}
+      - Rare: {"embeddings": [{"embedding": [...]}]}
+    """
+    if "embeddings" not in payload:
+        raise ValueError(f"Missing 'embeddings' in payload keys={list(payload.keys())}")
+
+    emb = payload["embeddings"]
+
+    # If dict keyed by embedding type
+    if isinstance(emb, dict):
+        for key in ("float", "embedding", "embeddings", "int8", "uint8", "binary", "ubinary"):
+            if key in emb:
+                emb = emb[key]
+                break
+
+    # If list of dicts with "embedding" key
+    if isinstance(emb, list) and emb and isinstance(emb[0], dict) and "embedding" in emb[0]:
+        emb = [row["embedding"] for row in emb]
+
+    # Final check: must be list/tuple of vectors (numbers)
+    if not isinstance(emb, list):
+        raise ValueError(f"Unexpected embeddings type: {type(emb)} value sample={emb}")
+    if emb and isinstance(emb[0], str):
+        # Catch the bad case early instead of corrupting the list
+        raise ValueError(f"Embeddings came back as strings (sample={emb[:1]}), cannot use.")
+
+    return emb
+
+
 def embed_batch_cohere(texts):
     # Hard truncate within the batch for safety/throughput
     texts = [t[:MAX_TEXT_CHARS] for t in texts]
@@ -24,13 +58,9 @@ def embed_batch_cohere(texts):
                 contentType="application/json",
             )
             payload = json.loads(resp["body"].read())
-            emb = payload.get("embeddings")
-            # Cohere v4 may return dict keyed by embedding type
-            if isinstance(emb, dict):
-                for key in ("float", "int8", "uint8", "binary", "ubinary"):
-                    if key in emb:
-                        emb = emb[key]
-                        break
+            emb = extract_embeddings_from_payload(payload)
+            if len(emb) != len(texts):
+                raise ValueError(f"Embedding count mismatch: got {len(emb)} for batch {len(texts)}")
             return emb
         except Exception as e:
             last_err = e
@@ -75,80 +105,3 @@ embeddings = np.vstack(cleaned)
 
 print(f"Embeddings shape: {embeddings.shape} (records x dimensions)")
 assert embeddings.shape[0] == len(df), "Mismatch between embeddings and rows"
-
-
-
-# Use existing `embeddings` and `texts_ready` from the long run
-cleaned, bad = [None] * len(embeddings), []
-for idx, emb in enumerate(embeddings):
-    try:
-        # unwrap dict responses if present
-        if isinstance(emb, dict):
-            for key in ("float", "int8", "uint8", "binary", "ubinary"):
-                if key in emb:
-                    emb = emb[key]
-                    break
-        cleaned[idx] = np.asarray(emb, dtype=np.float32)
-    except Exception as e:
-        bad.append((idx, e))
-
-print(f"Needing retry: {len(bad)}")
-for idx, err in bad:
-    try:
-        re_emb = embed_single(texts_ready[idx])  # uses the single-item helper
-        cleaned[idx] = np.asarray(re_emb, dtype=np.float32)
-    except Exception as e2:
-        raise RuntimeError(f"Embedding parse failed at index {idx}: {err}; retry: {e2}")
-
-embeddings = np.vstack(cleaned)
-print(embeddings.shape)
-
-
-
-
-
-
-
-item = embeddings[0]
-print("type:", type(item))
-print("repr:", repr(item)[:400])
-
-
-
-
-import json, numpy as np
-
-def coerce_emb(emb):
-    if isinstance(emb, dict):
-        for key in ("float", "int8", "uint8", "binary", "ubinary"):
-            if key in emb:
-                emb = emb[key]
-                break
-    if isinstance(emb, str):
-        try:
-            emb = json.loads(emb)
-        except Exception:
-            emb = [float(x) for x in emb.replace(",", " ").split()]
-    if isinstance(emb, (list, tuple)):
-        emb = [float(x) for x in emb]
-    return np.asarray(emb, dtype=np.float32)
-
-cleaned, bad = [None] * len(embeddings), []
-for idx, emb in enumerate(embeddings):
-    try:
-        cleaned[idx] = coerce_emb(emb)
-    except Exception as e:
-        bad.append((idx, e))
-
-print("Needing retry:", len(bad))
-for idx, err in bad:
-    try:
-        re_emb = embed_single(texts_ready[idx])  # single-item helper you already defined
-        cleaned[idx] = coerce_emb(re_emb)
-    except Exception as e2:
-        raise RuntimeError(f"Embedding parse failed at index {idx}: {err}; retry: {e2}")
-
-embeddings = np.vstack(cleaned)
-print("Embeddings shape:", embeddings.shape)
-
-
