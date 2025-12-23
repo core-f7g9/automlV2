@@ -102,3 +102,53 @@ for idx, err in bad:
 
 embeddings = np.vstack(cleaned)
 print(embeddings.shape)
+
+
+
+
+
+
+
+item = embeddings[0]
+print("type:", type(item))
+print("repr:", repr(item)[:400])
+
+
+
+
+import json, numpy as np
+
+def coerce_emb(emb):
+    if isinstance(emb, dict):
+        for key in ("float", "int8", "uint8", "binary", "ubinary"):
+            if key in emb:
+                emb = emb[key]
+                break
+    if isinstance(emb, str):
+        try:
+            emb = json.loads(emb)
+        except Exception:
+            emb = [float(x) for x in emb.replace(",", " ").split()]
+    if isinstance(emb, (list, tuple)):
+        emb = [float(x) for x in emb]
+    return np.asarray(emb, dtype=np.float32)
+
+cleaned, bad = [None] * len(embeddings), []
+for idx, emb in enumerate(embeddings):
+    try:
+        cleaned[idx] = coerce_emb(emb)
+    except Exception as e:
+        bad.append((idx, e))
+
+print("Needing retry:", len(bad))
+for idx, err in bad:
+    try:
+        re_emb = embed_single(texts_ready[idx])  # single-item helper you already defined
+        cleaned[idx] = coerce_emb(re_emb)
+    except Exception as e2:
+        raise RuntimeError(f"Embedding parse failed at index {idx}: {err}; retry: {e2}")
+
+embeddings = np.vstack(cleaned)
+print("Embeddings shape:", embeddings.shape)
+
+
