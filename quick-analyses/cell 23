@@ -11,19 +11,47 @@ elif "theme_cluster_bedrock" in df.columns:
 else:
     raise ValueError("No theme column found. Run clustering first.")
 
+def find_first_matching(cols, patterns):
+    for pat in patterns:
+        for col in cols:
+            col_l = col.lower()
+            if all(p in col_l for p in pat):
+                return col
+    return None
+
+
 def ensure_datetime(col_name, fallback_cols):
     if col_name in df.columns and is_datetime64_any_dtype(df[col_name]):
         return
     for src in fallback_cols:
-        if src in df.columns:
+        if src and src in df.columns:
             df[col_name] = pd.to_datetime(df[src], errors="coerce")
             return
     df[col_name] = pd.to_datetime(df.get(col_name), errors="coerce")
 
 
 # Ensure open_hours exists (handle Salesforce string dates like "3/28/2025, 9:27 AM")
-ensure_datetime("opened_at", ["Date/Time opened", "Date/Time Opened", "Opened At"])
-ensure_datetime("closed_at", ["Date/Time closed", "Date/Time Closed", "Closed At"])
+open_src = None
+close_src = None
+if "OPEN_COL" in globals():
+    open_src = OPEN_COL
+if "CLOSE_COL" in globals():
+    close_src = CLOSE_COL
+
+open_src = open_src or find_first_matching(
+    df.columns,
+    [["date", "open"], ["opened"], ["open"]],
+)
+close_src = close_src or find_first_matching(
+    df.columns,
+    [["date", "close"], ["closed"], ["close"]],
+)
+
+print(f"Using opened_at source: {open_src}")
+print(f"Using closed_at source: {close_src}")
+
+ensure_datetime("opened_at", [open_src, "Date/Time opened", "Date/Time Opened", "Opened At"])
+ensure_datetime("closed_at", [close_src, "Date/Time closed", "Date/Time Closed", "Closed At"])
 
 if "open_hours" not in df.columns:
     df["open_hours"] = (df["closed_at"] - df["opened_at"]).dt.total_seconds() / 3600.0
