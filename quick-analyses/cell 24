@@ -1,0 +1,44 @@
+import matplotlib.pyplot as plt
+
+# --- Repeat contact analytics ---
+REPEAT_DAYS = 7
+TOP_THEMES_FOR_REPEAT = 10
+
+if "opened_at" not in df.columns:
+    df["opened_at"] = pd.to_datetime(df.get("opened_at"), errors="coerce")
+
+if EMAIL_COL not in df.columns:
+    raise ValueError(f"Missing {EMAIL_COL} for repeat-contact analysis.")
+
+df_repeat = df[[EMAIL_COL, "opened_at", THEME_COL]].dropna(subset=[EMAIL_COL, "opened_at"]).copy()
+df_repeat.sort_values([EMAIL_COL, "opened_at"], inplace=True)
+
+df_repeat["prev_opened_at"] = df_repeat.groupby(EMAIL_COL)["opened_at"].shift(1)
+df_repeat["hours_since_prev"] = (
+    df_repeat["opened_at"] - df_repeat["prev_opened_at"]
+).dt.total_seconds() / 3600.0
+
+df_repeat["is_repeat_contact"] = df_repeat["hours_since_prev"] <= (REPEAT_DAYS * 24)
+
+overall_repeat_rate = df_repeat["is_repeat_contact"].mean()
+print(f"Repeat contact rate within {REPEAT_DAYS} days: {overall_repeat_rate:.2%}")
+
+repeat_by_theme = (
+    df_repeat.groupby(THEME_COL)
+    .agg(
+        tickets=("is_repeat_contact", "size"),
+        repeat_rate=("is_repeat_contact", "mean"),
+    )
+    .sort_values(["repeat_rate", "tickets"], ascending=[False, False])
+)
+
+print("Repeat contact by theme (top 15 by repeat rate):")
+display(repeat_by_theme.head(15))
+
+top_repeat = repeat_by_theme.head(TOP_THEMES_FOR_REPEAT).index
+plt.figure()
+repeat_by_theme.loc[top_repeat, "repeat_rate"].plot(kind="bar")
+plt.title(f"Repeat contact rate by theme (<= {REPEAT_DAYS} days)")
+plt.xlabel("Theme")
+plt.ylabel("Repeat rate")
+plt.show()

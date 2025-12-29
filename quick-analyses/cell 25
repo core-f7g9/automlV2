@@ -1,0 +1,60 @@
+import matplotlib.pyplot as plt
+
+# --- Incident volume attribution ---
+# Set these to your incident window
+INCIDENT_START = "2024-01-01"
+INCIDENT_END = "2024-01-07"
+TOP_THEMES_ATTRIBUTION = 10
+
+if "opened_at" not in df.columns:
+    df["opened_at"] = pd.to_datetime(df.get("opened_at"), errors="coerce")
+
+start = pd.to_datetime(INCIDENT_START)
+end = pd.to_datetime(INCIDENT_END)
+if pd.isna(start) or pd.isna(end):
+    raise ValueError("Set INCIDENT_START and INCIDENT_END to valid dates.")
+
+incident_df = df[(df["opened_at"] >= start) & (df["opened_at"] <= end)].copy()
+if incident_df.empty:
+    raise ValueError("No tickets in the incident window. Check dates.")
+
+# Baseline window: same length immediately before incident
+window_days = (end - start).days + 1
+baseline_start = start - pd.Timedelta(days=window_days)
+baseline_end = start - pd.Timedelta(days=1)
+
+baseline_df = df[(df["opened_at"] >= baseline_start) & (df["opened_at"] <= baseline_end)].copy()
+
+incident_counts = incident_df[THEME_COL].value_counts()
+baseline_counts = baseline_df[THEME_COL].value_counts()
+
+attrib = (
+    pd.DataFrame({
+        "incident": incident_counts,
+        "baseline": baseline_counts
+    })
+    .fillna(0)
+)
+
+attrib["delta"] = attrib["incident"] - attrib["baseline"]
+attrib["incident_share"] = attrib["incident"] / attrib["incident"].sum()
+
+attrib = attrib.sort_values(["incident_share", "delta"], ascending=[False, False])
+
+print("Incident volume attribution (top themes):")
+display(attrib.head(15))
+
+top_attr = attrib.head(TOP_THEMES_ATTRIBUTION)
+plt.figure()
+top_attr["incident_share"].plot(kind="bar")
+plt.title("Incident volume share by theme")
+plt.xlabel("Theme")
+plt.ylabel("Share of incident tickets")
+plt.show()
+
+plt.figure()
+top_attr["delta"].plot(kind="bar")
+plt.title("Incident vs baseline volume delta by theme")
+plt.xlabel("Theme")
+plt.ylabel("Ticket count delta")
+plt.show()

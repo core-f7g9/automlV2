@@ -1,0 +1,54 @@
+import matplotlib.pyplot as plt
+
+# --- Time-to-resolution (TTR) analytics ---
+TOP_THEMES_FOR_TTR = 10
+
+if "theme_top" in df.columns:
+    THEME_COL = "theme_top"
+elif "theme_cluster_bedrock" in df.columns:
+    THEME_COL = "theme_cluster_bedrock"
+else:
+    raise ValueError("No theme column found. Run clustering first.")
+
+# Ensure open_hours exists
+if "open_hours" not in df.columns:
+    df["opened_at"] = pd.to_datetime(df.get("opened_at"), errors="coerce")
+    df["closed_at"] = pd.to_datetime(df.get("closed_at"), errors="coerce")
+    df["open_hours"] = (df["closed_at"] - df["opened_at"]).dt.total_seconds() / 3600.0
+
+ttr = df["open_hours"].replace([np.inf, -np.inf], np.nan).dropna()
+ttr = ttr[ttr >= 0]
+
+plt.figure()
+ttr.plot(kind="hist", bins=60)
+plt.title("Time-to-resolution distribution (hours)")
+plt.xlabel("Hours to close")
+plt.ylabel("Tickets")
+plt.show()
+
+
+def q90(x):
+    return x.quantile(0.90)
+
+
+def q95(x):
+    return x.quantile(0.95)
+
+
+ttr_by_theme = (
+    df.loc[ttr.index]
+    .groupby(THEME_COL)["open_hours"]
+    .agg(tickets="size", mean="mean", p50="median", p90=q90, p95=q95)
+    .sort_values("tickets", ascending=False)
+)
+
+print("TTR summary by theme (top by volume):")
+display(ttr_by_theme.head(15))
+
+top_themes = ttr_by_theme.head(TOP_THEMES_FOR_TTR).index
+plt.figure()
+ttr_by_theme.loc[top_themes, "p90"].plot(kind="bar")
+plt.title("P90 time-to-resolution by top themes")
+plt.xlabel("Theme")
+plt.ylabel("P90 hours to close")
+plt.show()
