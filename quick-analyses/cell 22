@@ -1,0 +1,109 @@
+import boto3
+from sklearn.metrics.pairwise import cosine_distances
+
+# --- Labeling parameters ---
+LABEL_MODEL_ID = "anthropic.claude-3-sonnet-20240229-v1:0"
+LABEL_TOP_EXAMPLES = 12
+LABEL_SUB_EXAMPLES = 10
+LABEL_MAX_CHARS = 1200
+# ---------------------------
+
+brt = boto3.client("bedrock-runtime", region_name=boto3.Session().region_name)
+
+
+def invoke_claude(prompt: str) -> str:
+    body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 150,
+        "temperature": 0.0,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    resp = brt.invoke_model(
+        modelId=LABEL_MODEL_ID,
+        body=json.dumps(body),
+        accept="application/json",
+        contentType="application/json",
+    )
+    payload = json.loads(resp["body"].read())
+    return payload["content"][0]["text"].strip()
+
+
+def label_cluster(mask, n_examples, parent_label=None):
+    vecs = embeddings[mask]
+    rows = df.loc[mask]
+    center = vecs.mean(axis=0, keepdims=True)
+    dists = cosine_distances(vecs, center).flatten()
+    top_idx = np.argsort(dists)[:n_examples]
+    reps = rows.iloc[top_idx]
+
+    examples = []
+    for _, r in reps.iterrows():
+        example_text = (
+            f"Subject: {r.get(SUBJECT_COL, '')}\n"
+            f"Ticket: {r.get('text', '')}"
+        )
+        examples.append(truncate_text(example_text, LABEL_MAX_CHARS))
+
+    parent_line = f"Parent theme: {parent_label}\n" if parent_label else ""
+    prompt = f"""
+You are labeling a cluster of support tickets.
+{parent_line}
+Return ONE concise theme label (3-7 words).
+Use business-friendly language.
+No punctuation. No explanations.
+Return ONLY the label text.
+
+Ticket examples:
+----------------
+{chr(10).join(examples)}
+""".strip()
+
+    return invoke_claude(prompt)
+
+
+# Label top themes
+top_rows = []
+for top_id in range(TOP_THEMES):
+    mask = df["theme_top"] == top_id
+    if mask.sum() == 0:
+        continue
+    label = label_cluster(mask, LABEL_TOP_EXAMPLES)
+    top_rows.append({
+        "theme_top": top_id,
+        "top_label": label,
+        "tickets": int(mask.sum())
+    })
+
+top_label_df = pd.DataFrame(top_rows).sort_values("tickets", ascending=False)
+display(top_label_df)
+
+# Label sub-themes
+sub_rows = []
+for top_id in range(TOP_THEMES):
+    top_label = top_label_df.set_index("theme_top").loc[top_id, "top_label"]
+    for sub_id in sorted(df.loc[df["theme_top"] == top_id, "theme_sub_local"].unique()):
+        sub_mask = (df["theme_top"] == top_id) & (df["theme_sub_local"] == sub_id)
+        if sub_mask.sum() == 0:
+            continue
+        sub_label = label_cluster(sub_mask, LABEL_SUB_EXAMPLES, parent_label=top_label)
+        sub_rows.append({
+            "theme_top": top_id,
+            "top_label": top_label,
+            "theme_sub_local": int(sub_id),
+            "theme_sub_id": f"{top_id}.{int(sub_id)}",
+            "sub_label": sub_label,
+            "tickets": int(sub_mask.sum())
+        })
+
+sub_label_df = pd.DataFrame(sub_rows).sort_values(
+    ["theme_top", "tickets"], ascending=[True, False]
+)
+display(sub_label_df)
+
+# Attach labels onto df for downstream analysis
+df = df.merge(top_label_df[["theme_top", "top_label"]], on="theme_top", how="left")
+df = df.merge(
+    sub_label_df[["theme_top", "theme_sub_local", "sub_label"]],
+    on=["theme_top", "theme_sub_local"],
+    how="left"
+)

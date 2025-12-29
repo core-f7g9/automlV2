@@ -1,0 +1,55 @@
+from sklearn.cluster import KMeans
+import numpy as np
+import pandas as pd
+
+# --- Hierarchical theme parameters ---
+TOP_THEMES = 5                # main themes
+SUB_THEMES_PER_TOP = 4        # sub-themes per main theme (max)
+MIN_SUBTHEME_SIZE = 50        # avoid tiny sub-clusters
+# -------------------------------------
+
+# Top-level clustering
+kmeans_top = KMeans(n_clusters=TOP_THEMES, random_state=42, n_init="auto")
+df["theme_top"] = kmeans_top.fit_predict(embeddings)
+
+# Sub-theme clustering within each top theme
+df["theme_sub_local"] = -1
+df["theme_sub_id"] = ""
+
+sub_rows = []
+for top_id in range(TOP_THEMES):
+    mask = df["theme_top"] == top_id
+    n = int(mask.sum())
+    if n == 0:
+        continue
+
+    # Choose sub-cluster count based on size
+    n_sub = min(SUB_THEMES_PER_TOP, max(1, n // MIN_SUBTHEME_SIZE))
+
+    if n_sub == 1:
+        df.loc[mask, "theme_sub_local"] = 0
+        df.loc[mask, "theme_sub_id"] = f"{top_id}.0"
+        sub_rows.append({"theme_top": top_id, "theme_sub_local": 0, "tickets": n})
+        continue
+
+    sub_kmeans = KMeans(n_clusters=n_sub, random_state=42, n_init="auto")
+    sub_labels = sub_kmeans.fit_predict(embeddings[mask])
+
+    df.loc[mask, "theme_sub_local"] = sub_labels
+    df.loc[mask, "theme_sub_id"] = [f"{top_id}.{s}" for s in sub_labels]
+
+    for s in range(n_sub):
+        sub_rows.append({
+            "theme_top": top_id,
+            "theme_sub_local": s,
+            "tickets": int((sub_labels == s).sum())
+        })
+
+top_counts = df["theme_top"].value_counts().sort_index()
+sub_counts = pd.DataFrame(sub_rows).sort_values(["theme_top", "tickets"], ascending=[True, False])
+
+print("Top-level theme counts:")
+print(top_counts)
+
+print("\nSub-theme counts (per top theme):")
+display(sub_counts)
