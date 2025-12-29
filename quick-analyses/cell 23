@@ -22,21 +22,29 @@ def ensure_datetime(col_name, fallback_cols):
 
 
 # Ensure open_hours exists (handle Salesforce string dates like "3/28/2025, 9:27 AM")
-ensure_datetime("opened_at", ["Date/Time opened", "Opened At"])
-ensure_datetime("closed_at", ["Date/Time closed", "Closed At"])
+ensure_datetime("opened_at", ["Date/Time opened", "Date/Time Opened", "Opened At"])
+ensure_datetime("closed_at", ["Date/Time closed", "Date/Time Closed", "Closed At"])
 
-if "open_hours" not in df.columns or not np.issubdtype(df["open_hours"].dtype, np.number):
+if "open_hours" not in df.columns:
     df["open_hours"] = (df["closed_at"] - df["opened_at"]).dt.total_seconds() / 3600.0
+else:
+    df["open_hours"] = pd.to_numeric(df["open_hours"], errors="coerce")
 
-ttr = df["open_hours"].replace([np.inf, -np.inf], np.nan).dropna()
-ttr = ttr[ttr >= 0]
+ttr_mask = df["open_hours"].notna() & (df["open_hours"] >= 0)
 
-plt.figure()
-ttr.plot(kind="hist", bins=60)
-plt.title("Time-to-resolution distribution (hours)")
-plt.xlabel("Hours to close")
-plt.ylabel("Tickets")
-plt.show()
+if ttr_mask.sum() == 0:
+    print("No valid open_hours found. Check opened/closed dates or missingness.")
+    print("opened_at missing:", df["opened_at"].isna().mean())
+    print("closed_at missing:", df["closed_at"].isna().mean())
+else:
+    ttr = df.loc[ttr_mask, "open_hours"]
+
+    plt.figure()
+    ttr.plot(kind="hist", bins=60)
+    plt.title("Time-to-resolution distribution (hours)")
+    plt.xlabel("Hours to close")
+    plt.ylabel("Tickets")
+    plt.show()
 
 
 def q90(x):
@@ -47,20 +55,25 @@ def q95(x):
     return x.quantile(0.95)
 
 
-ttr_by_theme = (
-    df.loc[ttr.index]
-    .groupby(THEME_COL)["open_hours"]
-    .agg(tickets="size", mean="mean", p50="median", p90=q90, p95=q95)
-    .sort_values("tickets", ascending=False)
-)
+if ttr_mask.sum() > 0:
+    ttr_by_theme = (
+        df.loc[ttr_mask]
+        .groupby(THEME_COL)["open_hours"]
+        .agg(tickets="size", mean="mean", p50="median", p90=q90, p95=q95)
+        .sort_values("tickets", ascending=False)
+    )
 
-print("TTR summary by theme (top by volume):")
-display(ttr_by_theme.head(15))
+    if ttr_by_theme.empty:
+        print("No TTR data after grouping. Check theme assignments and open_hours.")
+    else:
+        print("TTR summary by theme (top by volume):")
+        display(ttr_by_theme.head(15))
 
-top_themes = ttr_by_theme.head(TOP_THEMES_FOR_TTR).index
-plt.figure()
-ttr_by_theme.loc[top_themes, "p90"].plot(kind="bar")
-plt.title("P90 time-to-resolution by top themes")
-plt.xlabel("Theme")
-plt.ylabel("P90 hours to close")
-plt.show()
+        top_themes = ttr_by_theme.head(TOP_THEMES_FOR_TTR).index
+        if len(top_themes) > 0:
+            plt.figure()
+            ttr_by_theme.loc[top_themes, "p90"].plot(kind="bar")
+            plt.title("P90 time-to-resolution by top themes")
+            plt.xlabel("Theme")
+            plt.ylabel("P90 hours to close")
+            plt.show()
