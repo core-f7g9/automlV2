@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+from pandas.api.types import is_datetime64_any_dtype
 
 # --- Incident volume attribution ---
 # Set these to your incident window
@@ -6,8 +7,17 @@ INCIDENT_START = "2024-01-01"
 INCIDENT_END = "2024-01-07"
 TOP_THEMES_ATTRIBUTION = 10
 
-if "opened_at" not in df.columns:
-    df["opened_at"] = pd.to_datetime(df.get("opened_at"), errors="coerce")
+def ensure_datetime(col_name, fallback_cols):
+    if col_name in df.columns and is_datetime64_any_dtype(df[col_name]):
+        return
+    for src in fallback_cols:
+        if src in df.columns:
+            df[col_name] = pd.to_datetime(df[src], errors="coerce")
+            return
+    df[col_name] = pd.to_datetime(df.get(col_name), errors="coerce")
+
+
+ensure_datetime("opened_at", ["Date/Time opened", "Opened At"])
 
 start = pd.to_datetime(INCIDENT_START)
 end = pd.to_datetime(INCIDENT_END)
