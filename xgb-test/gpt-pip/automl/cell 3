@@ -57,7 +57,7 @@ for t in TARGET_COLS:
         role=role,
         target_attribute_name=t,
         problem_type="MulticlassClassification",
-        objective_metric_name="Accuracy",
+        job_objective={"MetricName": "Accuracy"},
         max_candidates=param_max_candidates,
         sagemaker_session=pipeline_session,
         output_path=automl_out_s3,
