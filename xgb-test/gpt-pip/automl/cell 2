@@ -1,0 +1,63 @@
+import time
+import boto3
+
+sm = boto3.client("sagemaker", region_name=region)
+
+ROLE_ARN = role  # must be an IAM role ARN string
+AUTOPILOT_OUTPUT_PREFIX = f"s3://{BUCKET}/{PROJECT_PREFIX}/autopilot-output"
+
+# Keep job names short-ish and unique
+def make_job_name(tgt: str):
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    safe = "".join([c for c in tgt if c.isalnum()])[:20]
+    return f"{PROJECT_PREFIX[:20]}-{safe}-{ts}".replace("_", "-")
+
+autopilot_jobs = {}  # tgt -> job_name
+
+for tgt, paths in autopilot_paths.items():
+    job_name = make_job_name(tgt)
+    autopilot_jobs[tgt] = job_name
+
+    print(f"\nStarting Autopilot for {tgt}: {job_name}")
+
+    sm.create_auto_ml_job(
+        AutoMLJobName=job_name,
+        InputDataConfig=[
+            {
+                "DataSource": {
+                    "S3DataSource": {
+                        "S3DataType": "S3Prefix",
+                        "S3Uri": paths["train"],
+                    }
+                },
+                "TargetAttributeName": tgt,
+                "ContentType": "text/csv",
+            }
+        ],
+        OutputDataConfig={"S3OutputPath": AUTOPILOT_OUTPUT_PREFIX},
+        AutoMLJobConfig={
+            "CompletionCriteria": {"MaxCandidates": 10},
+            "SecurityConfig": {},  # optionally set VPC/KMS/etc.
+        },
+        RoleArn=ROLE_ARN,
+        ProblemType="MulticlassClassification",
+        AutoMLJobObjective={"MetricName": "Accuracy"},
+    )
+
+# Wait for completion
+def wait_for_autopilot(job_name: str, poll_sec=60):
+    while True:
+        desc = sm.describe_auto_ml_job(AutoMLJobName=job_name)
+        status = desc["AutoMLJobStatus"]
+        sec = desc.get("AutoMLJobSecondaryStatus")
+        print(f"  [{job_name}] status={status} secondary={sec}")
+        if status in ("Completed", "Failed", "Stopped"):
+            return desc
+        time.sleep(poll_sec)
+
+autopilot_desc = {}
+for tgt, job_name in autopilot_jobs.items():
+    print(f"\nWaiting on {tgt} ({job_name})...")
+    autopilot_desc[tgt] = wait_for_autopilot(job_name, poll_sec=60)
+
+print("\n✅ Autopilot jobs finished (or failed).")
