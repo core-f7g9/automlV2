@@ -16,16 +16,19 @@ sklearn_processor = SKLearnProcessor(
 
 steps = []
 
-for t in TARGET_COLS:
-    # Unique per execution + target
-    exec_id = ExecutionVariables.PIPELINE_EXECUTION_ID
+# NOTE: ensure you have these correct imports somewhere above this cell:
+# from sagemaker.automl import AutoML, InputDataConfig
+# from sagemaker.workflow.automl_step import AutoMLStep
 
+exec_id = ExecutionVariables.PIPELINE_EXECUTION_ID  # define once
+
+for t in TARGET_COLS:
     # Processing outputs (S3)
     proc_train_s3 = Join(on="/", values=[param_output_base, exec_id, t, "split", "train"])
     proc_val_s3   = Join(on="/", values=[param_output_base, exec_id, t, "split", "validation"])
     automl_out_s3  = Join(on="/", values=[param_output_base, exec_id, t, "automl"])
 
-    # 1) ProcessingStep: build target-specific train/val CSVs
+    # 1) ProcessingStep: build target-specific train/val CSVs (your script does stratified split)
     process_step = ProcessingStep(
         name=f"Process-{t}",
         processor=sklearn_processor,
@@ -49,7 +52,6 @@ for t in TARGET_COLS:
             "--out-val", "/opt/ml/processing/validation",
         ],
     )
-
     steps.append(process_step)
 
     # 2) AutoMLStep (Autopilot) for this target
@@ -67,15 +69,13 @@ for t in TARGET_COLS:
         name=f"AutoML-{t}",
         automl=automl,
         inputs=[
-            sagemaker.automl.automl.InputDataConfig(
+            InputDataConfig(
                 data_source=process_step.properties.ProcessingOutputConfig.Outputs["train"].S3Output.S3Uri,
-                compression_type="None",
                 content_type="text/csv",
                 channel_type="training",
             ),
-            sagemaker.automl.automl.InputDataConfig(
+            InputDataConfig(
                 data_source=process_step.properties.ProcessingOutputConfig.Outputs["validation"].S3Output.S3Uri,
-                compression_type="None",
                 content_type="text/csv",
                 channel_type="validation",
             ),

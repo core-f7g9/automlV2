@@ -14,6 +14,7 @@ from sagemaker.workflow.steps import ProcessingStep
 
 from sagemaker.automl.automl import AutoML
 from sagemaker.workflow.automl_step import AutoMLStep
+from sagemaker.automl import AutoML, InputDataConfig
 
 region = boto3.Session().region_name
 sm_session = sagemaker.Session()
