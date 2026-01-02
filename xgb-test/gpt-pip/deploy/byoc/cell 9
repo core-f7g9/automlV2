@@ -1,5 +1,6 @@
 # ============================
-# Sample 100 records and check accuracy per target
+# Endpoint smoke-eval: sample N records and check accuracy per target
+# (Matches preprocess "valid target" rules + normalizes comparison + baseline)
 # ============================
 import boto3
 import json
@@ -32,32 +33,68 @@ INPUT_FEATURES = INPUT_FEATURES if "INPUT_FEATURES" in globals() else [
 endpoint_name = f"{PROJECT_PREFIX}-custom-endpoint"
 runtime = boto3.client("sagemaker-runtime", region_name=region)
 
-# --- Load dataset from S3 ---
+# ----------------------------
+# Helpers
+# ----------------------------
+def valid_target_mask(series: pd.Series) -> pd.Series:
+    """
+    Match the preprocess-side notion of 'valid target':
+      - excludes NaN/None
+      - excludes whitespace-only
+      - excludes textual placeholders: "nan", "none", "null" (case variants)
+    NOTE: This version intentionally does NOT exclude "0" or "0.0"
+          because many GL-style fields legitimately use 0.
+          If your training preprocessing excludes "0", add it to the set below.
+    """
+    s = series
+    s_str = s.astype(str).str.strip()
+
+    missing_values = {
+        "", "nan", "NaN",
+        "none", "None",
+        "null", "NULL",
+    }
+
+    missing = s.isna() | s_str.isin(missing_values)
+    return ~missing
+
+def normalize_str(x: pd.Series) -> pd.Series:
+    # Normalize for comparison (strip whitespace; preserve content)
+    return x.astype(str).str.strip()
+
+# ----------------------------
+# Load dataset from S3
+# ----------------------------
 print("Reading data from:", INPUT_S3)
 df = pd.read_csv(INPUT_S3)
-
 print("Total rows in dataset:", len(df))
 
-N_SAMPLES = 100
+# Optional: ensure required columns exist
+required_cols = set(TARGET_COLS + INPUT_FEATURES)
+missing_cols = [c for c in required_cols if c not in df.columns]
+if missing_cols:
+    raise ValueError(f"Missing required columns in CSV: {missing_cols}")
+
+N_SAMPLES = 500  # bump from 100 for a more stable signal
+RANDOM_STATE = 42
+
 results = {}
 
 for tgt in TARGET_COLS:
-    # Only keep rows where this target is present
-    df_t = df[df[tgt].notna()].copy()
+    mask = valid_target_mask(df[tgt])
+    df_t = df.loc[mask, :].copy()
+
     if df_t.empty:
-        print(f"\n[tgt={tgt}] No non-null rows, skipping.")
+        print(f"\n[tgt={tgt}] No valid rows after filtering, skipping.")
         continue
 
     n = min(N_SAMPLES, len(df_t))
-    sample = df_t.sample(n=n, random_state=42)
+    sample = df_t.sample(n=n, random_state=RANDOM_STATE).copy()
 
     # Build instances list from input feature columns
     instances = sample[INPUT_FEATURES].to_dict(orient="records")
 
-    payload = {
-        "target": tgt,
-        "instances": instances,
-    }
+    payload = {"target": tgt, "instances": instances}
 
     response = runtime.invoke_endpoint(
         EndpointName=endpoint_name,
@@ -66,20 +103,52 @@ for tgt in TARGET_COLS:
     )
 
     resp_json = json.loads(response["Body"].read().decode("utf-8"))
-    preds = [p["prediction"] for p in resp_json["predictions"]]
 
-    # Compare with ground truth
+    # Defensive parsing: support either {"predictions":[...]} or direct list
+    if isinstance(resp_json, dict) and "predictions" in resp_json:
+        preds = [p.get("prediction") for p in resp_json["predictions"]]
+    elif isinstance(resp_json, list):
+        preds = [p.get("prediction") for p in resp_json]
+    else:
+        raise ValueError(f"Unexpected response shape for target={tgt}: {type(resp_json)} keys={getattr(resp_json,'keys',lambda:[])()}")
+
+    if len(preds) != len(sample):
+        raise ValueError(f"Prediction count mismatch for target={tgt}: got {len(preds)} preds for {len(sample)} rows")
+
     sample["pred"] = preds
-    # Cast both to str to avoid label-type mismatch
-    acc = (sample[tgt].astype(str) == sample["pred"].astype(str)).mean()
-    results[tgt] = acc
+
+    # Compare with ground truth (normalized strings)
+    gt = normalize_str(sample[tgt])
+    pd_ = normalize_str(sample["pred"])
+
+    acc = (gt == pd_).mean()
+
+    # Majority-class baseline on the same sample (useful sanity signal)
+    majority = gt.value_counts().idxmax()
+    baseline_acc = (gt == majority).mean()
+
+    # Coverage signal
+    n_classes = gt.nunique()
+
+    results[tgt] = {
+        "accuracy": float(acc),
+        "baseline_majority_acc": float(baseline_acc),
+        "n_rows": int(n),
+        "n_classes_in_sample": int(n_classes),
+    }
 
     print(f"\nTarget: {tgt}")
-    print(f"  Evaluated on {n} rows")
-    print(f"  Accuracy: {acc:.4f}")
+    print(f"  Evaluated rows:          {n}")
+    print(f"  Classes in sample:       {n_classes}")
+    print(f"  Accuracy:                {acc:.4f}")
+    print(f"  Majority baseline acc:   {baseline_acc:.4f}")
     print("  Sample predictions:")
-    print(sample[[*INPUT_FEATURES, tgt, "pred"]].head())
+    print(sample[[*INPUT_FEATURES, tgt, "pred"]].head(10))
 
 print("\n=== Summary ===")
-for tgt, acc in results.items():
-    print(f"{tgt}: accuracy = {acc:.4f}")
+for tgt, m in results.items():
+    print(
+        f"{tgt}: accuracy={m['accuracy']:.4f} | "
+        f"baseline={m['baseline_majority_acc']:.4f} | "
+        f"rows={m['n_rows']} | classes={m['n_classes_in_sample']}"
+    )

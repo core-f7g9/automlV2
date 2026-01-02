@@ -15,7 +15,7 @@ from sagemaker.workflow.functions import Join
 
 # Sessions
 sm_session = sm_session if "sm_session" in globals() else sagemaker.Session()
-pipeline_session = PipelineSession(sagemaker_session=sm_session)
+pipeline_session = PipelineSession()
 
 # Reuse region/role/BUCKET/PROJECT_PREFIX/INPUT_S3/TARGET_COLS/INPUT_FEATURES
 
