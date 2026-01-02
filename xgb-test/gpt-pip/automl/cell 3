@@ -1,47 +1,115 @@
-import boto3
-import time
+# -------------------------------
+# Pipeline parameters (optional)
+# -------------------------------
+AUTOML_MAX_CANDIDATES = ParameterInteger("AutoMLMaxCandidates", default_value=25)
+AUTOML_TOTAL_RUNTIME  = ParameterInteger("AutoMLTotalRuntimeSec", default_value=3600)  # 1 hour per target
+AUTOML_MODE           = ParameterString("AutoMLMode", default_value="ENSEMBLING")      # best accuracy in most cases
 
-sm = boto3.client("sagemaker", region_name=region)
-
-AUTOPILOT_JOB_NAME = f"ap-{PROJECT_PREFIX}-{TARGET}".lower().replace("_", "-")
-
-train_path = f"s3://{BUCKET}/{PROJECT_PREFIX}/ap/{TARGET}/train.csv"
-val_path   = f"s3://{BUCKET}/{PROJECT_PREFIX}/ap/{TARGET}/val.csv"
-
-train_df.to_csv("/tmp/train.csv", index=False)
-val_df.to_csv("/tmp/val.csv", index=False)
-
-boto3.client("s3").upload_file("/tmp/train.csv", BUCKET, f"{PROJECT_PREFIX}/ap/{TARGET}/train.csv")
-boto3.client("s3").upload_file("/tmp/val.csv", BUCKET, f"{PROJECT_PREFIX}/ap/{TARGET}/val.csv")
-
-sm.create_auto_ml_job(
-    AutoMLJobName=AUTOPILOT_JOB_NAME,
-    InputDataConfig=[
-        {
-            "DataSource": {
-                "S3DataSource": {
-                    "S3DataType": "S3Prefix",
-                    "S3Uri": train_path,
-                }
-            },
-            "TargetAttributeName": TARGET,
-            "ContentType": "text/csv",
-        }
-    ],
-    OutputDataConfig={"S3OutputPath": f"s3://{BUCKET}/{PROJECT_PREFIX}/ap-output"},
-    AutoMLJobConfig={
-        "CompletionCriteria": {"MaxCandidates": 10}
-    },
-    RoleArn=role,
-    ProblemType="MulticlassClassification",
-    AutoMLJobObjective={"MetricName": "Accuracy"},
+# -------------------------------
+# PREP STEP (Processing)
+# -------------------------------
+prep_processor = ScriptProcessor(
+    image_uri=sagemaker.image_uris.retrieve("sklearn", region, version="1.2-1"),
+    role=role,
+    command=["python3"],
+    instance_type="ml.m5.xlarge",
+    instance_count=1,
+    sagemaker_session=pipeline_session,
 )
 
-# Wait
-while True:
-    desc = sm.describe_auto_ml_job(AutoMLJobName=AUTOPILOT_JOB_NAME)
-    status = desc["AutoMLJobStatus"]
-    print("Autopilot status:", status)
-    if status in ("Completed", "Failed"):
-        break
-    time.sleep(60)
+prep_prefix = f"{PROJECT_PREFIX}/prep_for_autopilot"
+
+step_prep = ProcessingStep(
+    name="PrepForAutopilot",
+    processor=prep_processor,
+    inputs=[
+        ProcessingInput(
+            input_name="raw",
+            source=INPUT_S3,
+            destination="/opt/ml/processing/input",
+        )
+    ],
+    outputs=[
+        ProcessingOutput(
+            output_name="prep",
+            source="/opt/ml/processing/output",
+            destination=f"s3://{BUCKET}/{prep_prefix}",
+        )
+    ],
+    code="prep_for_autopilot.py",
+    job_arguments=[
+        "--input_dir", "/opt/ml/processing/input",
+        "--targets", json.dumps(TARGET_COLS),
+        "--input_features", json.dumps(INPUT_FEATURES),
+        "--output_dir", "/opt/ml/processing/output",
+        "--test_size", "0.2",
+        "--random_state", "42",
+    ],
+)
+
+prep_uri = step_prep.properties.ProcessingOutputConfig.Outputs["prep"].S3Output.S3Uri
+
+# -------------------------------
+# AutoML TRAIN (per target)
+# -------------------------------
+automl_steps = []
+
+for tgt in TARGET_COLS:
+    # Each target gets its own Autopilot job output location
+    automl_output = f"s3://{BUCKET}/{PROJECT_PREFIX}/automl-output/{tgt}"
+
+    # Build S3 paths to the prep outputs for this target
+    train_s3 = Join(on="/", values=[prep_uri, tgt, "train.csv"])
+    val_s3   = Join(on="/", values=[prep_uri, tgt, "val.csv"])
+
+    # Autopilot job config (SDK AutoML object)
+    # - problem_type: use multiclass; if one of your targets is actually binary, Autopilot can still handle it.
+    # - mode: ENSEMBLING is what AutoMLStep supports for native step usage per AWS guidance. :contentReference[oaicite:3]{index=3}
+    automl = AutoML(
+        role=role,
+        target_attribute_name=tgt,
+        output_path=automl_output,
+        problem_type="MulticlassClassification",
+        mode=AUTOML_MODE,
+        max_candidates=AUTOML_MAX_CANDIDATES,
+        total_job_runtime_in_seconds=AUTOML_TOTAL_RUNTIME,
+        sagemaker_session=pipeline_session,
+    )
+
+    automl_inputs = [
+        AutoMLInput(
+            inputs=train_s3,
+            target_attribute_name=tgt,
+            channel_type="training",
+            content_type="text/csv",
+        ),
+        AutoMLInput(
+            inputs=val_s3,
+            target_attribute_name=tgt,
+            channel_type="validation",
+            content_type="text/csv",
+        ),
+    ]
+
+    step_args = automl.fit(inputs=automl_inputs)
+
+    step_automl = AutoMLStep(
+        name=f"AutoML_{tgt}",
+        step_args=step_args,
+        depends_on=[step_prep],
+    )
+
+    automl_steps.append(step_automl)
+
+# -------------------------------
+# PIPELINE (train-only)
+# -------------------------------
+pipeline = Pipeline(
+    name="MultiTarget-Autopilot-TrainOnly",
+    parameters=[AUTOML_MAX_CANDIDATES, AUTOML_TOTAL_RUNTIME, AUTOML_MODE],
+    steps=[step_prep] + automl_steps,
+    sagemaker_session=pipeline_session,
+)
+
+pipeline.upsert(role_arn=role)
+print("✅ Autopilot train-only pipeline upserted:", pipeline.name)

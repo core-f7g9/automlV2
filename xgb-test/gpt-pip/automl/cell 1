@@ -1,35 +1,34 @@
-import pandas as pd
-import numpy as np
-from sklearn.model_selection import train_test_split
+import os
+import json
+import boto3
+import sagemaker
 
-# Reuse existing globals
-INPUT_S3 = INPUT_S3
-TARGET_COLS = TARGET_COLS
-INPUT_FEATURES = INPUT_FEATURES
+from sagemaker import get_execution_role
+from sagemaker.workflow.pipeline_context import PipelineSession
+from sagemaker.workflow.pipeline import Pipeline
+from sagemaker.workflow.steps import ProcessingStep
+from sagemaker.workflow.functions import Join
+from sagemaker.workflow.parameters import ParameterInteger, ParameterString
 
-def valid_target_mask(series):
-    s = series.astype(str).str.strip()
-    return ~(
-        series.isna() |
-        s.isin({"", "nan", "NaN", "none", "None", "null", "NULL"})
-    )
+from sagemaker.processing import ScriptProcessor, ProcessingInput, ProcessingOutput
+from sagemaker.workflow.automl_step import AutoMLStep
+from sagemaker.automl.automl import AutoML, AutoMLInput
 
-df = pd.read_csv(INPUT_S3)
-print("Total rows:", len(df))
+# --- Region / sessions / role ---
+region = boto3.Session().region_name
+sm_session = sagemaker.Session()
+pipeline_session = PipelineSession()
+role = get_execution_role()
 
-TARGET = "DepartmentCode"   # <<< test ONE target first
+# --- Project config ---
+BUCKET = sm_session.default_bucket()
+PROJECT_PREFIX = "multi-target-automl"
+INPUT_S3 = f"s3://{BUCKET}/{PROJECT_PREFIX}/input/data.csv"
+OUTPUT_PREFIX = f"s3://{BUCKET}/{PROJECT_PREFIX}"
 
-df_t = df.loc[valid_target_mask(df[TARGET]), INPUT_FEATURES + [TARGET]].copy()
-df_t[TARGET] = df_t[TARGET].astype(str).str.strip()
+TARGET_COLS = ["DepartmentCode", "AccountCode", "SubAccountCode", "LocationCode"]
+INPUT_FEATURES = ["VendorName", "LineDescription", "ClubNumber"]
 
-train_df, val_df = train_test_split(
-    df_t,
-    test_size=0.2,
-    random_state=42,
-    shuffle=True,
-    stratify=df_t[TARGET] if df_t[TARGET].value_counts().min() >= 2 else None
-)
-
-print("Train rows:", len(train_df))
-print("Val rows:", len(val_df))
-print("Classes:", train_df[TARGET].nunique())
+print("Region:", region)
+print("Bucket:", BUCKET)
+print("Input:", INPUT_S3)

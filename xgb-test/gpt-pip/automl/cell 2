@@ -1,61 +1,88 @@
-from sklearn.feature_extraction.text import HashingVectorizer
-from scipy import sparse
-import xgboost as xgb
+%%writefile prep_for_autopilot.py
+import argparse
+import os
+import glob
+import json
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
 
-# ----- Feature construction -----
-hash_dim = 2000
-vec = HashingVectorizer(
-    n_features=hash_dim,
-    alternate_sign=False,
-    norm=None
-)
+def valid_target_mask(series: pd.Series) -> pd.Series:
+    s = series
+    s_str = s.astype(str).str.strip()
+    missing_values = {"", "nan", "NaN", "none", "None", "null", "NULL"}
+    missing = s.isna() | s_str.isin(missing_values)
+    return ~missing
 
-X_train_text = vec.transform(
-    (train_df["VendorName"].fillna("") + " " +
-     train_df["LineDescription"].fillna("")).astype(str)
-)
+def can_stratify(y: np.ndarray, min_per_class: int = 2) -> bool:
+    _, counts = np.unique(y, return_counts=True)
+    return (counts.min() >= min_per_class)
 
-X_val_text = vec.transform(
-    (val_df["VendorName"].fillna("") + " " +
-     val_df["LineDescription"].fillna("")).astype(str)
-)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input_dir", required=True)
+    parser.add_argument("--targets", required=True)           # json list
+    parser.add_argument("--input_features", required=True)    # json list
+    parser.add_argument("--output_dir", required=True)
+    parser.add_argument("--test_size", type=float, default=0.2)
+    parser.add_argument("--random_state", type=int, default=42)
+    args = parser.parse_args()
 
-X_train_num = sparse.csr_matrix(train_df[["ClubNumber"]].fillna(0).values)
-X_val_num   = sparse.csr_matrix(val_df[["ClubNumber"]].fillna(0).values)
+    targets = json.loads(args.targets)
+    feats = json.loads(args.input_features)
+    os.makedirs(args.output_dir, exist_ok=True)
 
-X_train = sparse.hstack([X_train_text, X_train_num])
-X_val   = sparse.hstack([X_val_text, X_val_num])
+    csv_files = glob.glob(os.path.join(args.input_dir, "*.csv"))
+    if not csv_files:
+        raise FileNotFoundError("No CSV found in input_dir")
 
-# ----- Labels -----
-labels = sorted(train_df[TARGET].unique())
-label_map = {v: i for i, v in enumerate(labels)}
+    df = pd.read_csv(csv_files[0])
+    print(f"[prep] Loaded {csv_files[0]} rows={len(df)}")
 
-y_train = train_df[TARGET].map(label_map).values
-y_val   = val_df[TARGET].map(label_map).values
+    missing_cols = [c for c in feats + targets if c not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
 
-# ----- Train XGBoost -----
-dtrain = xgb.DMatrix(X_train, label=y_train)
-dval   = xgb.DMatrix(X_val, label=y_val)
+    # Basic feature cleanup (keep it simple; Autopilot will handle encodings internally)
+    for c in feats:
+        if df[c].dtype == object:
+            df[c] = df[c].fillna("").astype(str)
+        else:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
-params = {
-    "objective": "multi:softprob",
-    "num_class": len(label_map),
-    "eval_metric": "merror",
-    "tree_method": "hist",
-    "max_depth": 8,
-    "eta": 0.2,
-}
+    for tgt in targets:
+        print("-" * 60)
+        print(f"[prep] Target={tgt}")
 
-bst = xgb.train(
-    params,
-    dtrain,
-    num_boost_round=200,
-    evals=[(dval, "val")],
-    verbose_eval=False
-)
+        mask = valid_target_mask(df[tgt])
+        df_t = df.loc[mask, feats + [tgt]].copy()
+        print(f"[prep] Valid rows={len(df_t)} / {len(df)}")
 
-# ----- Evaluate -----
-preds = bst.predict(dval)
-xgb_acc = (preds.argmax(axis=1) == y_val).mean()
+        if len(df_t) == 0:
+            print(f"[prep] Skipping {tgt}: no valid rows")
+            continue
 
-print(f"XGBoost accuracy: {xgb_acc:.4f}")
+        # Stratify when feasible (classification-like targets)
+        y = df_t[tgt].astype(str).values
+        stratify = y if can_stratify(y) else None
+
+        train_df, val_df = train_test_split(
+            df_t,
+            test_size=args.test_size,
+            random_state=args.random_state,
+            shuffle=True,
+            stratify=stratify,
+        )
+
+        out_dir = os.path.join(args.output_dir, tgt)
+        os.makedirs(out_dir, exist_ok=True)
+
+        train_path = os.path.join(out_dir, "train.csv")
+        val_path = os.path.join(out_dir, "val.csv")
+        train_df.to_csv(train_path, index=False)
+        val_df.to_csv(val_path, index=False)
+
+        print(f"[prep] Wrote: {train_path} rows={len(train_df)}")
+        print(f"[prep] Wrote: {val_path} rows={len(val_df)}")
+
+    print("✅ Autopilot-prep complete")

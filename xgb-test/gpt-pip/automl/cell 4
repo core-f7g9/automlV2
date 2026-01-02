@@ -1,5 +1,2 @@
-best = desc["BestCandidate"]
-metrics = best["FinalAutoMLJobObjectiveMetric"]
-
-print("Autopilot best candidate metric:")
-print(metrics)
+execution = pipeline.start()
+print("Started execution:", execution.arn)
