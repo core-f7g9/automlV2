@@ -1,56 +1,52 @@
 # ============================
-# Endpoint smoke-eval: sample N records and check accuracy per target
-# (Matches preprocess "valid target" rules + normalizes comparison + baseline)
+# Endpoint evaluation
+# (STRICTLY on values the model was trained on)
 # ============================
 import boto3
 import json
 import pandas as pd
 import sagemaker
 
-# --- Reuse existing globals when possible ---
+# ----------------------------
+# Reuse globals if present
+# ----------------------------
 region = region if "region" in globals() else boto3.Session().region_name
 sm_sess = sm_session if "sm_session" in globals() else sagemaker.Session()
 BUCKET = BUCKET if "BUCKET" in globals() else sm_sess.default_bucket()
 PROJECT_PREFIX = PROJECT_PREFIX if "PROJECT_PREFIX" in globals() else "multi-target-xgb"
 
-# Input data location (same as pipeline)
 INPUT_S3 = INPUT_S3 if "INPUT_S3" in globals() else f"s3://{BUCKET}/{PROJECT_PREFIX}/input/data.csv"
 
-# Targets & features (same as pipeline)
 TARGET_COLS = TARGET_COLS if "TARGET_COLS" in globals() else [
     "DepartmentCode",
     "AccountCode",
     "SubAccountCode",
     "LocationCode",
 ]
+
 INPUT_FEATURES = INPUT_FEATURES if "INPUT_FEATURES" in globals() else [
     "VendorName",
     "LineDescription",
     "ClubNumber",
 ]
 
-# Endpoint name (same pattern as deploy cell)
 endpoint_name = f"{PROJECT_PREFIX}-custom-endpoint"
 runtime = boto3.client("sagemaker-runtime", region_name=region)
 
 # ----------------------------
-# Helpers
+# Helpers (MATCH TRAINING LOGIC)
 # ----------------------------
 def valid_target_mask(series: pd.Series) -> pd.Series:
     """
-    Match the preprocess-side notion of 'valid target':
-      - excludes NaN/None
-      - excludes whitespace-only
-      - excludes textual placeholders: "nan", "none", "null" (case variants)
-    NOTE: This version intentionally does NOT exclude "0" or "0.0"
-          because many GL-style fields legitimately use 0.
-          If your training preprocessing excludes "0", add it to the set below.
+    EXACTLY mirrors the training-side exclusion logic.
+    These values were NOT trained on and MUST be excluded.
     """
     s = series
     s_str = s.astype(str).str.strip()
 
     missing_values = {
-        "", "nan", "NaN",
+        "", "0", "0.0",
+        "nan", "NaN",
         "none", "None",
         "null", "NULL",
     }
@@ -59,41 +55,44 @@ def valid_target_mask(series: pd.Series) -> pd.Series:
     return ~missing
 
 def normalize_str(x: pd.Series) -> pd.Series:
-    # Normalize for comparison (strip whitespace; preserve content)
     return x.astype(str).str.strip()
 
 # ----------------------------
-# Load dataset from S3
+# Load dataset
 # ----------------------------
 print("Reading data from:", INPUT_S3)
 df = pd.read_csv(INPUT_S3)
 print("Total rows in dataset:", len(df))
 
-# Optional: ensure required columns exist
+# Validate schema
 required_cols = set(TARGET_COLS + INPUT_FEATURES)
 missing_cols = [c for c in required_cols if c not in df.columns]
 if missing_cols:
-    raise ValueError(f"Missing required columns in CSV: {missing_cols}")
+    raise ValueError(f"Missing required columns: {missing_cols}")
 
-N_SAMPLES = 500  # bump from 100 for a more stable signal
+# ----------------------------
+# Evaluation
+# ----------------------------
+N_SAMPLES = 500     # increase if dataset allows
 RANDOM_STATE = 42
 
 results = {}
 
 for tgt in TARGET_COLS:
+    print("\n" + "=" * 70)
+    print(f"Target: {tgt}")
+
     mask = valid_target_mask(df[tgt])
-    df_t = df.loc[mask, :].copy()
+    df_t = df.loc[mask].copy()
 
     if df_t.empty:
-        print(f"\n[tgt={tgt}] No valid rows after filtering, skipping.")
+        print("  No rows after filtering; skipping.")
         continue
 
     n = min(N_SAMPLES, len(df_t))
     sample = df_t.sample(n=n, random_state=RANDOM_STATE).copy()
 
-    # Build instances list from input feature columns
     instances = sample[INPUT_FEATURES].to_dict(orient="records")
-
     payload = {"target": tgt, "instances": instances}
 
     response = runtime.invoke_endpoint(
@@ -104,51 +103,52 @@ for tgt in TARGET_COLS:
 
     resp_json = json.loads(response["Body"].read().decode("utf-8"))
 
-    # Defensive parsing: support either {"predictions":[...]} or direct list
+    # Support both wrapped and flat responses
     if isinstance(resp_json, dict) and "predictions" in resp_json:
-        preds = [p.get("prediction") for p in resp_json["predictions"]]
+        preds = [p["prediction"] for p in resp_json["predictions"]]
     elif isinstance(resp_json, list):
-        preds = [p.get("prediction") for p in resp_json]
+        preds = [p["prediction"] for p in resp_json]
     else:
-        raise ValueError(f"Unexpected response shape for target={tgt}: {type(resp_json)} keys={getattr(resp_json,'keys',lambda:[])()}")
+        raise ValueError(f"Unexpected response format for {tgt}")
 
     if len(preds) != len(sample):
-        raise ValueError(f"Prediction count mismatch for target={tgt}: got {len(preds)} preds for {len(sample)} rows")
+        raise ValueError("Prediction count mismatch")
 
     sample["pred"] = preds
 
-    # Compare with ground truth (normalized strings)
     gt = normalize_str(sample[tgt])
     pd_ = normalize_str(sample["pred"])
 
-    acc = (gt == pd_).mean()
+    accuracy = (gt == pd_).mean()
 
-    # Majority-class baseline on the same sample (useful sanity signal)
-    majority = gt.value_counts().idxmax()
-    baseline_acc = (gt == majority).mean()
-
-    # Coverage signal
-    n_classes = gt.nunique()
+    # Majority-class baseline (on SAME filtered rows)
+    majority_label = gt.value_counts().idxmax()
+    baseline = (gt == majority_label).mean()
 
     results[tgt] = {
-        "accuracy": float(acc),
-        "baseline_majority_acc": float(baseline_acc),
-        "n_rows": int(n),
-        "n_classes_in_sample": int(n_classes),
+        "accuracy": float(accuracy),
+        "baseline": float(baseline),
+        "rows": int(n),
+        "classes": int(gt.nunique()),
     }
 
-    print(f"\nTarget: {tgt}")
-    print(f"  Evaluated rows:          {n}")
-    print(f"  Classes in sample:       {n_classes}")
-    print(f"  Accuracy:                {acc:.4f}")
-    print(f"  Majority baseline acc:   {baseline_acc:.4f}")
+    print(f"  Rows evaluated:        {n}")
+    print(f"  Classes evaluated:     {gt.nunique()}")
+    print(f"  Accuracy:              {accuracy:.4f}")
+    print(f"  Majority baseline:     {baseline:.4f}")
     print("  Sample predictions:")
     print(sample[[*INPUT_FEATURES, tgt, "pred"]].head(10))
 
-print("\n=== Summary ===")
+# ----------------------------
+# Summary
+# ----------------------------
+print("\n" + "=" * 70)
+print("SUMMARY (NON-ZERO / NON-NULL ONLY)")
 for tgt, m in results.items():
     print(
-        f"{tgt}: accuracy={m['accuracy']:.4f} | "
-        f"baseline={m['baseline_majority_acc']:.4f} | "
-        f"rows={m['n_rows']} | classes={m['n_classes_in_sample']}"
+        f"{tgt}: "
+        f"accuracy={m['accuracy']:.4f}, "
+        f"baseline={m['baseline']:.4f}, "
+        f"rows={m['rows']}, "
+        f"classes={m['classes']}"
     )
