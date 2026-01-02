@@ -1,101 +1,94 @@
-AUTOML_MAX_CANDIDATES = ParameterInteger("AutoMLMaxCandidates", default_value=5)
-AUTOML_TOTAL_RUNTIME  = ParameterInteger("AutoMLTotalRuntimeSec", default_value=1800)  # per target
+# Pipeline parameters (override at execution time if needed)
+param_input_s3 = ParameterString(name="InputS3", default_value=INPUT_S3)
+param_output_base = ParameterString(name="OutputBase", default_value=OUTPUT_BASE)
 
-# --------- Step 1: Processing (split) ----------
-img = sagemaker.image_uris.retrieve("sklearn", region, version="1.2-1")
-script_processor = ScriptProcessor(
-    image_uri=img,
+param_val_frac = ParameterFloat(name="ValFrac", default_value=0.2)
+param_max_candidates = ParameterInteger(name="MaxCandidates", default_value=20)
+
+# Processing infra
+sklearn_processor = SKLearnProcessor(
+    framework_version="1.2-1",
     role=role,
-    instance_type="ml.m5.xlarge",
+    instance_type="ml.m5.4xlarge",
     instance_count=1,
-    command=["python3"],
     sagemaker_session=pipeline_session,
 )
 
-split_step = ProcessingStep(
-    name="SplitTrainValidation",
-    processor=script_processor,
-    inputs=[
-        ProcessingInput(source=INPUT_S3, destination="/opt/ml/processing/input")
-    ],
-    outputs=[
-        ProcessingOutput(output_name="train",      source="/opt/ml/processing/output/train"),
-        ProcessingOutput(output_name="validation", source="/opt/ml/processing/output/validation"),
-    ],
-    code="prep_split_multitarget.py",
-    job_arguments=[
-        "--targets", json.dumps(TARGET_COLS),
-        "--input_features", json.dumps(INPUT_FEATURES),
-        "--val_frac", "0.2",
-        "--random_seed", "42",
-        "--mounted_input_dir", "/opt/ml/processing/input",
-        "--output_dir", "/opt/ml/processing/output",
-        "--min_rows", "50",
-    ],
-)
+steps = []
 
-train_root_s3 = split_step.properties.ProcessingOutputConfig.Outputs["train"].S3Output.S3Uri
-val_root_s3   = split_step.properties.ProcessingOutputConfig.Outputs["validation"].S3Output.S3Uri
+for t in TARGET_COLS:
+    # Unique per execution + target
+    exec_id = ExecutionVariables.PIPELINE_EXECUTION_ID
 
-# --------- Step 2: AutoML per target (use S3 PREFIXES + validation channel) ----------
-automl_steps = []
+    # Processing outputs (S3)
+    proc_train_s3 = Join(on="/", values=[param_output_base, exec_id, t, "split", "train"])
+    proc_val_s3   = Join(on="/", values=[param_output_base, exec_id, t, "split", "validation"])
+    automl_out_s3  = Join(on="/", values=[param_output_base, exec_id, t, "automl"])
 
-for tgt in TARGET_COLS:
-    tgt_safe = safe_name(tgt.lower(), max_len=22)
-    project_safe = safe_name(PROJECT_PREFIX.lower(), max_len=18)
+    # 1) ProcessingStep: build target-specific train/val CSVs
+    process_step = ProcessingStep(
+        name=f"Process-{t}",
+        processor=sklearn_processor,
+        inputs=[
+            ProcessingInput(
+                source=param_input_s3,
+                destination="/opt/ml/processing/input/data.csv",
+            )
+        ],
+        outputs=[
+            ProcessingOutput(output_name="train", source="/opt/ml/processing/train", destination=proc_train_s3),
+            ProcessingOutput(output_name="validation", source="/opt/ml/processing/validation", destination=proc_val_s3),
+        ],
+        code="preprocess_and_split.py",
+        job_arguments=[
+            "--input-csv", "/opt/ml/processing/input/data.csv",
+            "--target-col", t,
+            "--feature-cols", ",".join(INPUT_FEATURES),
+            "--val-frac", param_val_frac,
+            "--out-train", "/opt/ml/processing/train",
+            "--out-val", "/opt/ml/processing/validation",
+        ],
+    )
 
-    # IMPORTANT: pass prefixes, not file paths
-    train_prefix = Join(on="/", values=[train_root_s3, tgt])       # contains train.csv
-    val_prefix   = Join(on="/", values=[val_root_s3, tgt])         # contains validation.csv
+    steps.append(process_step)
 
-    automl_output = f"s3://{BUCKET}/{PROJECT_PREFIX}/autopilot-output/{tgt_safe}/"
-
-    auto_inputs = [
-        AutoMLInput(
-            inputs=train_prefix,
-            channel_type="training",
-            content_type="text/csv;header=present",
-            target_attribute_name=tgt,
-        ),
-        AutoMLInput(
-            inputs=val_prefix,
-            channel_type="validation",
-            content_type="text/csv;header=present",
-            target_attribute_name=tgt,
-        ),
-    ]
-
+    # 2) AutoMLStep (Autopilot) for this target
     automl = AutoML(
         role=role,
-        sagemaker_session=pipeline_session,
-        target_attribute_name=tgt,
-        output_path=automl_output,
+        target_attribute_name=t,
         problem_type="MulticlassClassification",
-        job_objective={"MetricName": "Accuracy"},
-        max_candidates=AUTOML_MAX_CANDIDATES,
-        mode="ENSEMBLING",  # required for AutoMLStep
-        total_job_runtime_in_seconds=AUTOML_TOTAL_RUNTIME,
-        max_runtime_per_training_job_in_seconds=900,
-        base_job_name=f"{project_safe}-{tgt_safe}",
+        objective_metric_name="Accuracy",
+        max_candidates=param_max_candidates,
+        sagemaker_session=pipeline_session,
+        output_path=automl_out_s3,
     )
 
-    step_args = automl.fit(inputs=auto_inputs)
-
-    step_automl = AutoMLStep(
-        name=f"AutoML-{tgt_safe}",
-        step_args=step_args,
-        depends_on=[split_step],
+    automl_step = AutoMLStep(
+        name=f"AutoML-{t}",
+        automl=automl,
+        inputs=[
+            sagemaker.automl.automl.InputDataConfig(
+                data_source=process_step.properties.ProcessingOutputConfig.Outputs["train"].S3Output.S3Uri,
+                compression_type="None",
+                content_type="text/csv",
+                channel_type="training",
+            ),
+            sagemaker.automl.automl.InputDataConfig(
+                data_source=process_step.properties.ProcessingOutputConfig.Outputs["validation"].S3Output.S3Uri,
+                compression_type="None",
+                content_type="text/csv",
+                channel_type="validation",
+            ),
+        ],
     )
 
-    automl_steps.append(step_automl)
+    # Ensure AutoML waits for preprocessing
+    automl_step.add_depends_on([process_step])
+    steps.append(automl_step)
 
-# --------- Build & upsert the pipeline ----------
 pipeline = Pipeline(
-    name=safe_name(f"{PROJECT_PREFIX}-train-only", max_len=80),
-    parameters=[AUTOML_MAX_CANDIDATES, AUTOML_TOTAL_RUNTIME],
-    steps=[split_step] + automl_steps,
+    name=PIPELINE_NAME,
+    parameters=[param_input_s3, param_output_base, param_val_frac, param_max_candidates],
+    steps=steps,
     sagemaker_session=pipeline_session,
 )
-
-pipeline.upsert(role_arn=role)
-print("✅ Upserted:", pipeline.name)

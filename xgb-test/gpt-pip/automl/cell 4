@@ -1,2 +1,12 @@
-execution = pipeline.start()
-print("Started execution ARN:", execution.arn)
+# Create/update the pipeline in SageMaker
+pipeline.upsert(role_arn=role)
+print("Pipeline upserted:", pipeline.name)
+
+# Start execution
+execution = pipeline.start(parameters={
+    "InputS3": INPUT_S3,
+    "OutputBase": OUTPUT_BASE,
+    "ValFrac": 0.2,
+    "MaxCandidates": 20,
+})
+print("Execution ARN:", execution.arn)
