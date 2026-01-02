@@ -44,3 +44,23 @@ for s in automl_steps:
     meta = s.get("Metadata", {})
     # Print whole metadata to see the exact key names in your account/SDK
     print(json.dumps(meta, indent=2, default=str))
+
+
+
+def describe_automl_job_by_name(job_name: str):
+    d = sm.describe_auto_ml_job(AutoMLJobName=job_name)
+    print("\nJOB:", job_name)
+    print("Status:", d.get("AutoMLJobStatus"))
+    print("Secondary:", d.get("AutoMLJobSecondaryStatus"))
+    print("FailureReason:", d.get("FailureReason"))
+    pfr = d.get("PartialFailureReasons", [])
+    if pfr:
+        print("PartialFailureReasons:")
+        for r in pfr:
+            print(" -", r.get("PartialFailureMessage"))
+    else:
+        print("PartialFailureReasons: (none)")
+    return d
+
+# Example: replace with the actual name you saw in Cell B output
+# describe_automl_job_by_name("<AutoMLJobName>")
