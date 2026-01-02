@@ -1,0 +1,13 @@
+import boto3
+sm = boto3.client("sagemaker", region_name=region)
+
+resp = sm.list_auto_ml_jobs(SortBy="CreationTime", SortOrder="Descending", MaxResults=20)
+for j in resp["AutoMLJobSummaries"][:8]:
+    name = j["AutoMLJobName"]
+    if PROJECT_PREFIX in name:
+        d = sm.describe_auto_ml_job(AutoMLJobName=name)
+        print("\nJOB:", name)
+        print("Status:", d.get("AutoMLJobStatus"), "Secondary:", d.get("AutoMLJobSecondaryStatus"))
+        print("FailureReason:", d.get("FailureReason"))
+        for r in d.get("PartialFailureReasons", []):
+            print(" -", r.get("PartialFailureMessage"))
