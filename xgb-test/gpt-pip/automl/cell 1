@@ -1,79 +1,35 @@
-import boto3
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
 
-region = region if "region" in globals() else boto3.Session().region_name
-s3 = boto3.client("s3", region_name=region)
-
-BUCKET = BUCKET
-PROJECT_PREFIX = PROJECT_PREFIX
+# Reuse existing globals
 INPUT_S3 = INPUT_S3
 TARGET_COLS = TARGET_COLS
 INPUT_FEATURES = INPUT_FEATURES
 
-AUTOPILOT_DATA_PREFIX = f"{PROJECT_PREFIX}/autopilot-data"  # where train/val CSVs go
-TEST_SIZE = 0.2
-RANDOM_STATE = 42
-
-def parse_s3_uri(uri: str):
-    assert uri.startswith("s3://")
-    b, k = uri.replace("s3://", "", 1).split("/", 1)
-    return b, k
-
-def valid_target_mask(series: pd.Series) -> pd.Series:
-    # Match your current preprocess.py (no 0 removal)
-    s = series
-    s_str = s.astype(str).str.strip()
-    missing_values = {"", "nan", "NaN", "none", "None", "null", "NULL"}
-    missing = s.isna() | s_str.isin(missing_values)
-    return ~missing
-
-print("Reading:", INPUT_S3)
-df = pd.read_csv(INPUT_S3)
-print("Rows:", len(df))
-
-# Basic schema check
-missing_cols = [c for c in (TARGET_COLS + INPUT_FEATURES) if c not in df.columns]
-if missing_cols:
-    raise ValueError(f"Missing required columns in input CSV: {missing_cols}")
-
-autopilot_paths = {}  # tgt -> {"train": s3uri, "val": s3uri}
-
-for tgt in TARGET_COLS:
-    mask = valid_target_mask(df[tgt])
-    df_t = df.loc[mask, INPUT_FEATURES + [tgt]].copy()
-    if df_t.empty:
-        print(f"[{tgt}] no valid rows, skipping")
-        continue
-
-    # Autopilot likes clean strings; make target string
-    df_t[tgt] = df_t[tgt].astype(str).str.strip()
-
-    train_df, val_df = train_test_split(
-        df_t,
-        test_size=TEST_SIZE,
-        random_state=RANDOM_STATE,
-        shuffle=True,
-        stratify=df_t[tgt] if df_t[tgt].value_counts().min() >= 2 else None
+def valid_target_mask(series):
+    s = series.astype(str).str.strip()
+    return ~(
+        series.isna() |
+        s.isin({"", "nan", "NaN", "none", "None", "null", "NULL"})
     )
 
-    train_key = f"{AUTOPILOT_DATA_PREFIX}/{tgt}/train.csv"
-    val_key   = f"{AUTOPILOT_DATA_PREFIX}/{tgt}/val.csv"
+df = pd.read_csv(INPUT_S3)
+print("Total rows:", len(df))
 
-    # Write locally then upload (pandas -> /tmp)
-    train_path = f"/tmp/{PROJECT_PREFIX}-{tgt}-train.csv"
-    val_path   = f"/tmp/{PROJECT_PREFIX}-{tgt}-val.csv"
-    train_df.to_csv(train_path, index=False)
-    val_df.to_csv(val_path, index=False)
+TARGET = "DepartmentCode"   # <<< test ONE target first
 
-    s3.upload_file(train_path, BUCKET, train_key)
-    s3.upload_file(val_path, BUCKET, val_key)
+df_t = df.loc[valid_target_mask(df[TARGET]), INPUT_FEATURES + [TARGET]].copy()
+df_t[TARGET] = df_t[TARGET].astype(str).str.strip()
 
-    train_s3 = f"s3://{BUCKET}/{train_key}"
-    val_s3   = f"s3://{BUCKET}/{val_key}"
-    autopilot_paths[tgt] = {"train": train_s3, "val": val_s3}
+train_df, val_df = train_test_split(
+    df_t,
+    test_size=0.2,
+    random_state=42,
+    shuffle=True,
+    stratify=df_t[TARGET] if df_t[TARGET].value_counts().min() >= 2 else None
+)
 
-    print(f"[{tgt}] train={len(train_df)} val={len(val_df)} -> {train_s3} / {val_s3}")
-
-print("✅ Autopilot datasets staged.")
+print("Train rows:", len(train_df))
+print("Val rows:", len(val_df))
+print("Classes:", train_df[TARGET].nunique())

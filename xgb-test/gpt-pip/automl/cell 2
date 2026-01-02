@@ -1,63 +1,61 @@
-import time
-import boto3
+from sklearn.feature_extraction.text import HashingVectorizer
+from scipy import sparse
+import xgboost as xgb
 
-sm = boto3.client("sagemaker", region_name=region)
+# ----- Feature construction -----
+hash_dim = 2000
+vec = HashingVectorizer(
+    n_features=hash_dim,
+    alternate_sign=False,
+    norm=None
+)
 
-ROLE_ARN = role  # must be an IAM role ARN string
-AUTOPILOT_OUTPUT_PREFIX = f"s3://{BUCKET}/{PROJECT_PREFIX}/autopilot-output"
+X_train_text = vec.transform(
+    (train_df["VendorName"].fillna("") + " " +
+     train_df["LineDescription"].fillna("")).astype(str)
+)
 
-# Keep job names short-ish and unique
-def make_job_name(tgt: str):
-    ts = time.strftime("%Y%m%d-%H%M%S")
-    safe = "".join([c for c in tgt if c.isalnum()])[:20]
-    return f"{PROJECT_PREFIX[:20]}-{safe}-{ts}".replace("_", "-")
+X_val_text = vec.transform(
+    (val_df["VendorName"].fillna("") + " " +
+     val_df["LineDescription"].fillna("")).astype(str)
+)
 
-autopilot_jobs = {}  # tgt -> job_name
+X_train_num = sparse.csr_matrix(train_df[["ClubNumber"]].fillna(0).values)
+X_val_num   = sparse.csr_matrix(val_df[["ClubNumber"]].fillna(0).values)
 
-for tgt, paths in autopilot_paths.items():
-    job_name = make_job_name(tgt)
-    autopilot_jobs[tgt] = job_name
+X_train = sparse.hstack([X_train_text, X_train_num])
+X_val   = sparse.hstack([X_val_text, X_val_num])
 
-    print(f"\nStarting Autopilot for {tgt}: {job_name}")
+# ----- Labels -----
+labels = sorted(train_df[TARGET].unique())
+label_map = {v: i for i, v in enumerate(labels)}
 
-    sm.create_auto_ml_job(
-        AutoMLJobName=job_name,
-        InputDataConfig=[
-            {
-                "DataSource": {
-                    "S3DataSource": {
-                        "S3DataType": "S3Prefix",
-                        "S3Uri": paths["train"],
-                    }
-                },
-                "TargetAttributeName": tgt,
-                "ContentType": "text/csv",
-            }
-        ],
-        OutputDataConfig={"S3OutputPath": AUTOPILOT_OUTPUT_PREFIX},
-        AutoMLJobConfig={
-            "CompletionCriteria": {"MaxCandidates": 10},
-            "SecurityConfig": {},  # optionally set VPC/KMS/etc.
-        },
-        RoleArn=ROLE_ARN,
-        ProblemType="MulticlassClassification",
-        AutoMLJobObjective={"MetricName": "Accuracy"},
-    )
+y_train = train_df[TARGET].map(label_map).values
+y_val   = val_df[TARGET].map(label_map).values
 
-# Wait for completion
-def wait_for_autopilot(job_name: str, poll_sec=60):
-    while True:
-        desc = sm.describe_auto_ml_job(AutoMLJobName=job_name)
-        status = desc["AutoMLJobStatus"]
-        sec = desc.get("AutoMLJobSecondaryStatus")
-        print(f"  [{job_name}] status={status} secondary={sec}")
-        if status in ("Completed", "Failed", "Stopped"):
-            return desc
-        time.sleep(poll_sec)
+# ----- Train XGBoost -----
+dtrain = xgb.DMatrix(X_train, label=y_train)
+dval   = xgb.DMatrix(X_val, label=y_val)
 
-autopilot_desc = {}
-for tgt, job_name in autopilot_jobs.items():
-    print(f"\nWaiting on {tgt} ({job_name})...")
-    autopilot_desc[tgt] = wait_for_autopilot(job_name, poll_sec=60)
+params = {
+    "objective": "multi:softprob",
+    "num_class": len(label_map),
+    "eval_metric": "merror",
+    "tree_method": "hist",
+    "max_depth": 8,
+    "eta": 0.2,
+}
 
-print("\n✅ Autopilot jobs finished (or failed).")
+bst = xgb.train(
+    params,
+    dtrain,
+    num_boost_round=200,
+    evals=[(dval, "val")],
+    verbose_eval=False
+)
+
+# ----- Evaluate -----
+preds = bst.predict(dval)
+xgb_acc = (preds.argmax(axis=1) == y_val).mean()
+
+print(f"XGBoost accuracy: {xgb_acc:.4f}")

@@ -1,71 +1,47 @@
-import uuid
-import pandas as pd
 import boto3
 import time
 
 sm = boto3.client("sagemaker", region_name=region)
-s3 = boto3.client("s3", region_name=region)
 
-AUTOPILOT_PRED_PREFIX = f"{PROJECT_PREFIX}/autopilot-preds"
+AUTOPILOT_JOB_NAME = f"ap-{PROJECT_PREFIX}-{TARGET}".lower().replace("_", "-")
 
-def s3_download_text(s3_uri: str) -> str:
-    b, k = parse_s3_uri(s3_uri)
-    obj = s3.get_object(Bucket=b, Key=k)
-    return obj["Body"].read().decode("utf-8")
+train_path = f"s3://{BUCKET}/{PROJECT_PREFIX}/ap/{TARGET}/train.csv"
+val_path   = f"s3://{BUCKET}/{PROJECT_PREFIX}/ap/{TARGET}/val.csv"
 
-def wait_transform(job_name: str, poll_sec=30):
-    while True:
-        d = sm.describe_transform_job(TransformJobName=job_name)
-        st = d["TransformJobStatus"]
-        print(f"  [{job_name}] {st}")
-        if st in ("Completed", "Failed", "Stopped"):
-            return d
-        time.sleep(poll_sec)
+train_df.to_csv("/tmp/train.csv", index=False)
+val_df.to_csv("/tmp/val.csv", index=False)
 
-autopilot_pred_outputs = {}  # tgt -> s3_output_prefix
+boto3.client("s3").upload_file("/tmp/train.csv", BUCKET, f"{PROJECT_PREFIX}/ap/{TARGET}/train.csv")
+boto3.client("s3").upload_file("/tmp/val.csv", BUCKET, f"{PROJECT_PREFIX}/ap/{TARGET}/val.csv")
 
-for tgt, job_name in autopilot_jobs.items():
-    desc = sm.describe_auto_ml_job(AutoMLJobName=job_name)
-    if desc["AutoMLJobStatus"] != "Completed":
-        print(f"[{tgt}] Autopilot not completed, skipping.")
-        continue
-
-    best = desc["BestCandidate"]
-    containers = best["InferenceContainers"]  # list of container defs
-
-    # Create a model from the candidate
-    model_name = f"{PROJECT_PREFIX}-{tgt}-ap-model-{uuid.uuid4().hex[:8]}"
-    sm.create_model(
-        ModelName=model_name,
-        ExecutionRoleArn=ROLE_ARN,
-        Containers=containers,
-    )
-
-    # Transform job on val.csv
-    transform_name = f"{PROJECT_PREFIX}-{tgt}-ap-xform-{uuid.uuid4().hex[:8]}"
-    output_s3 = f"s3://{BUCKET}/{AUTOPILOT_PRED_PREFIX}/{tgt}/{transform_name}"
-
-    sm.create_transform_job(
-        TransformJobName=transform_name,
-        ModelName=model_name,
-        TransformInput={
-            "DataSource": {"S3DataSource": {"S3DataType": "S3Prefix", "S3Uri": autopilot_paths[tgt]["val"]}},
+sm.create_auto_ml_job(
+    AutoMLJobName=AUTOPILOT_JOB_NAME,
+    InputDataConfig=[
+        {
+            "DataSource": {
+                "S3DataSource": {
+                    "S3DataType": "S3Prefix",
+                    "S3Uri": train_path,
+                }
+            },
+            "TargetAttributeName": TARGET,
             "ContentType": "text/csv",
-            "SplitType": "Line",
-        },
-        TransformOutput={
-            "S3OutputPath": output_s3,
-            "Accept": "text/csv",
-        },
-        TransformResources={
-            "InstanceType": "ml.m5.xlarge",
-            "InstanceCount": 1,
-        },
-    )
+        }
+    ],
+    OutputDataConfig={"S3OutputPath": f"s3://{BUCKET}/{PROJECT_PREFIX}/ap-output"},
+    AutoMLJobConfig={
+        "CompletionCriteria": {"MaxCandidates": 10}
+    },
+    RoleArn=role,
+    ProblemType="MulticlassClassification",
+    AutoMLJobObjective={"MetricName": "Accuracy"},
+)
 
-    print(f"\n[{tgt}] Transform started -> {output_s3}")
-    wait_transform(transform_name, poll_sec=30)
-
-    autopilot_pred_outputs[tgt] = output_s3
-
-print("\n✅ Autopilot batch transforms complete.")
+# Wait
+while True:
+    desc = sm.describe_auto_ml_job(AutoMLJobName=AUTOPILOT_JOB_NAME)
+    status = desc["AutoMLJobStatus"]
+    print("Autopilot status:", status)
+    if status in ("Completed", "Failed"):
+        break
+    time.sleep(60)
