@@ -11,3 +11,36 @@ for j in resp["AutoMLJobSummaries"][:8]:
         print("FailureReason:", d.get("FailureReason"))
         for r in d.get("PartialFailureReasons", []):
             print(" -", r.get("PartialFailureMessage"))
+
+
+import json
+
+def list_all_steps(exec_arn: str):
+    steps = []
+    token = None
+    while True:
+        kwargs = dict(PipelineExecutionArn=exec_arn, MaxResults=50)
+        if token:
+            kwargs["NextToken"] = token
+        resp = sm.list_pipeline_execution_steps(**kwargs)
+        steps.extend(resp.get("PipelineExecutionSteps", []))
+        token = resp.get("NextToken")
+        if not token:
+            break
+    return steps
+
+steps = list_all_steps(execution.arn)
+
+print("Steps:")
+for s in steps:
+    print(f"- {s['StepName']}: {s['StepStatus']} | Type={s.get('StepType')}")
+
+# Find AutoML steps and print their metadata (this is where AutoML job info is stored)
+automl_steps = [s for s in steps if s.get("StepType") == "AutoML"]
+print("\nAutoML steps found:", len(automl_steps))
+
+for s in automl_steps:
+    print("\n=== STEP:", s["StepName"], "===")
+    meta = s.get("Metadata", {})
+    # Print whole metadata to see the exact key names in your account/SDK
+    print(json.dumps(meta, indent=2, default=str))
