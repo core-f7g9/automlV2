@@ -1,11 +1,32 @@
-%%writefile prep_for_autopilot.py
-import argparse
-import os
-import glob
-import json
+%%writefile prep_split_multitarget.py
+import argparse, os, glob, json
 import pandas as pd
 import numpy as np
-import csv
+
+def find_input_csv(mounted_dir: str) -> str:
+    candidates = glob.glob(os.path.join(mounted_dir, "*.csv"))
+    if len(candidates) == 1:
+        return candidates[0]
+    fallback = os.path.join(mounted_dir, "data.csv")
+    if os.path.exists(fallback):
+        return fallback
+    if candidates:
+        return sorted(candidates)[0]
+    raise FileNotFoundError(f"No CSV found under {mounted_dir}. Ensure your S3 object ends with .csv")
+
+def stratified_split(df, target_col, val_frac=0.2, seed=42):
+    rng = np.random.RandomState(seed)
+    val_idx = []
+    for cls, g in df.groupby(target_col):
+        if len(g) == 1:
+            continue
+        n_val = int(len(g) * val_frac)
+        n_val = max(1, n_val)
+        n_val = min(n_val, len(g) - 1)
+        val_idx.extend(rng.choice(g.index.values, size=n_val, replace=False))
+    val = df.loc[val_idx]
+    train = df.drop(index=val_idx)
+    return train, val
 
 def valid_target_mask(series: pd.Series) -> pd.Series:
     s_str = series.astype(str).str.strip()
@@ -13,39 +34,33 @@ def valid_target_mask(series: pd.Series) -> pd.Series:
     missing = series.isna() | s_str.isin(missing_values)
     return ~missing
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input_dir", required=True)
-    parser.add_argument("--targets", required=True)           # json list
-    parser.add_argument("--input_features", required=True)    # json list
-    parser.add_argument("--output_dir", required=True)
-    parser.add_argument("--random_state", type=int, default=42)
-    args = parser.parse_args()
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--targets", required=True)           # json list
+    p.add_argument("--input_features", required=True)    # json list
+    p.add_argument("--val_frac", type=float, default=0.2)
+    p.add_argument("--random_seed", type=int, default=42)
+    p.add_argument("--mounted_input_dir", type=str, default="/opt/ml/processing/input")
+    p.add_argument("--output_dir", type=str, default="/opt/ml/processing/output")
+    p.add_argument("--min_rows", type=int, default=50)   # fail fast threshold
+    args = p.parse_args()
 
     targets = json.loads(args.targets)
     feats = json.loads(args.input_features)
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    local_in = find_input_csv(args.mounted_input_dir)
+    df = pd.read_csv(local_in, low_memory=False)
 
-    csv_files = glob.glob(os.path.join(args.input_dir, "*.csv"))
-    if not csv_files:
-        raise FileNotFoundError("No CSV found in input_dir")
-
-    df = pd.read_csv(csv_files[0])
-    print(f"[prep] Loaded {csv_files[0]} rows={len(df)}")
-
+    # Basic checks
     missing_cols = [c for c in feats + targets if c not in df.columns]
     if missing_cols:
         raise ValueError(f"Missing required columns: {missing_cols}")
 
-    # Normalize feature columns (simple + safe; Autopilot handles encodings)
-    for c in feats:
-        if df[c].dtype == object:
-            df[c] = df[c].fillna("").astype(str)
-        else:
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
-
-    rng = np.random.default_rng(args.random_state)
+    # Ensure output structure
+    train_root = os.path.join(args.output_dir, "train")
+    val_root   = os.path.join(args.output_dir, "validation")
+    os.makedirs(train_root, exist_ok=True)
+    os.makedirs(val_root, exist_ok=True)
 
     for tgt in targets:
         print("-" * 60)
@@ -53,30 +68,40 @@ if __name__ == "__main__":
 
         mask = valid_target_mask(df[tgt])
         df_t = df.loc[mask, feats + [tgt]].copy()
-        print(f"[prep] Valid rows={len(df_t)} / {len(df)}")
 
-        if len(df_t) == 0:
-            print(f"[prep] Skipping {tgt}: no valid rows")
-            continue
+        # Fail fast (do NOT silently skip)
+        if len(df_t) < args.min_rows:
+            raise ValueError(f"Target {tgt} has insufficient valid rows ({len(df_t)}).")
 
-        # Shuffle once (Autopilot will do its own split)
-        idx = np.arange(len(df_t))
-        rng.shuffle(idx)
-        df_t = df_t.iloc[idx].reset_index(drop=True)
+        # Must have at least 2 classes for multiclass training
+        n_classes = df_t[tgt].nunique(dropna=True)
+        if n_classes < 2:
+            raise ValueError(f"Need at least 2 classes in target '{tgt}', found {n_classes}.")
 
-        out_dir = os.path.join(args.output_dir, tgt)
-        os.makedirs(out_dir, exist_ok=True)
-        out_path = os.path.join(out_dir, "train.csv")
+        print("[prep] Class counts (top 20):")
+        print(df_t[tgt].value_counts().head(20))
 
-        # Hardened CSV output (no lineterminator for compatibility)
-        df_t.to_csv(
-            out_path,
-            index=False,
-            encoding="utf-8",
-            quoting=csv.QUOTE_ALL,
-            escapechar="\\",
-        )
+        train_df, val_df = stratified_split(df_t, tgt, args.val_frac, args.random_seed)
 
-        print(f"[prep] Wrote: {out_path} rows={len(df_t)}")
+        # Ensure every class exists in train
+        missing_in_train = set(df_t[tgt].unique()) - set(train_df[tgt].unique())
+        if missing_in_train:
+            raise ValueError(f"Some classes have no training examples after split for {tgt}: {missing_in_train}")
 
-    print("✅ Autopilot-prep complete")
+        tgt_train_dir = os.path.join(train_root, tgt)
+        tgt_val_dir   = os.path.join(val_root, tgt)
+        os.makedirs(tgt_train_dir, exist_ok=True)
+        os.makedirs(tgt_val_dir, exist_ok=True)
+
+        train_path = os.path.join(tgt_train_dir, "train.csv")
+        val_path   = os.path.join(tgt_val_dir, "validation.csv")
+
+        train_df.to_csv(train_path, index=False)
+        val_df.to_csv(val_path, index=False)
+
+        print(f"[prep] Wrote train={len(train_df)} val={len(val_df)} for {tgt}")
+
+    print("✅ Multi-target prep/split complete")
+
+if __name__ == "__main__":
+    main()
