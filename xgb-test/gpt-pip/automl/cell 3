@@ -50,12 +50,19 @@ prep_uri = step_prep.properties.ProcessingOutputConfig.Outputs["prep"].S3Output.
 # -------------------------------
 # AutoML retry policy (internal errors)
 # -------------------------------
-retry_policy = StepRetryPolicy(
-    exception_types=[StepExceptionTypeEnum.SAGEMAKER_INTERNAL_ERROR],
-    interval_seconds=120,
-    max_attempts=3,
-    backoff_rate=2.0,
-)
+from sagemaker.workflow.retry import StepRetryPolicy, StepExceptionTypeEnum
+
+retry_policies = [
+    StepRetryPolicy(
+        exception_types=[
+            StepExceptionTypeEnum.SERVICE_FAULT,
+            StepExceptionTypeEnum.THROTTLING,
+        ],
+        max_attempts=5,
+        interval_seconds=30,
+        backoff_rate=2.0,
+    )
+]
 
 # -------------------------------
 # AutoML TRAIN (per target)
