@@ -15,7 +15,6 @@ from sagemaker.processing import ScriptProcessor, ProcessingInput, ProcessingOut
 
 from sagemaker.automl.automl import AutoML, AutoMLInput
 from sagemaker.workflow.automl_step import AutoMLStep
-from sagemaker.workflow.retry import StepRetryPolicy, StepExceptionTypeEnum
 
 # ---------- AWS context ----------
 region = boto3.Session().region_name
@@ -25,7 +24,7 @@ role = get_execution_role()
 
 # ---------- Project config ----------
 BUCKET = sm_session.default_bucket()
-PROJECT_PREFIX = "multi-target-automl"  # change if you want
+PROJECT_PREFIX = "multi-target-automl"  # change if desired
 INPUT_S3 = f"s3://{BUCKET}/{PROJECT_PREFIX}/input/data.csv"
 
 TARGET_COLS = ["DepartmentCode", "AccountCode", "SubAccountCode", "LocationCode"]

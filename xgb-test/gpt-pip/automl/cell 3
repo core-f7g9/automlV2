@@ -1,8 +1,8 @@
 # -------------------------------
-# Pipeline parameters
+# Pipeline parameters (tune these without changing code)
 # -------------------------------
 AUTOML_MAX_CANDIDATES = ParameterInteger("AutoMLMaxCandidates", default_value=15)
-AUTOML_TOTAL_RUNTIME  = ParameterInteger("AutoMLTotalRuntimeSec", default_value=3600)  # per target (seconds)
+AUTOML_TOTAL_RUNTIME  = ParameterInteger("AutoMLTotalRuntimeSec", default_value=3600)  # per target
 
 # -------------------------------
 # PREP STEP
@@ -48,23 +48,6 @@ step_prep = ProcessingStep(
 prep_uri = step_prep.properties.ProcessingOutputConfig.Outputs["prep"].S3Output.S3Uri
 
 # -------------------------------
-# AutoML retry policy (internal errors)
-# -------------------------------
-from sagemaker.workflow.retry import StepRetryPolicy, StepExceptionTypeEnum
-
-retry_policies = [
-    StepRetryPolicy(
-        exception_types=[
-            StepExceptionTypeEnum.SERVICE_FAULT,
-            StepExceptionTypeEnum.THROTTLING,
-        ],
-        max_attempts=5,
-        interval_seconds=30,
-        backoff_rate=2.0,
-    )
-]
-
-# -------------------------------
 # AutoML TRAIN (per target)
 # -------------------------------
 automl_steps = []
@@ -74,8 +57,6 @@ for tgt in TARGET_COLS:
     project_safe = safe_name(PROJECT_PREFIX.lower(), max_len=18)
 
     automl_output = f"s3://{BUCKET}/{PROJECT_PREFIX}/automl-output/{tgt_safe}"
-
-    # Training data produced by prep step
     train_s3 = Join(on="/", values=[prep_uri, tgt, "train.csv"])
 
     automl = AutoML(
@@ -87,11 +68,11 @@ for tgt in TARGET_COLS:
         job_objective={"MetricName": "Accuracy"},
         max_candidates=AUTOML_MAX_CANDIDATES,
         total_job_runtime_in_seconds=AUTOML_TOTAL_RUNTIME,
-        base_job_name=f"{project_safe}-{tgt_safe}",  # keep it short & safe
+        base_job_name=f"{project_safe}-{tgt_safe}",
         sagemaker_session=pipeline_session,
     )
 
-    # IMPORTANT: training channel ONLY (no validation channel for AutoMLStep robustness)
+    # training channel ONLY
     automl_inputs = [
         AutoMLInput(
             inputs=train_s3,
@@ -104,10 +85,9 @@ for tgt in TARGET_COLS:
     step_args = automl.fit(inputs=automl_inputs)
 
     step_automl = AutoMLStep(
-        name=f"AutoML-{tgt_safe}",     # no underscores
+        name=f"AutoML-{tgt_safe}",  # no underscores
         step_args=step_args,
         depends_on=[step_prep],
-        retry_policies=[retry_policy],
     )
 
     automl_steps.append(step_automl)

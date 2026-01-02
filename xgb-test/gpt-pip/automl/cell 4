@@ -1,2 +1,2 @@
 execution = pipeline.start()
-print("Started execution:", execution.arn)
+print("Started execution ARN:", execution.arn)
