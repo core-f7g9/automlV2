@@ -3,7 +3,6 @@
 # -------------------------------
 AUTOML_MAX_CANDIDATES = ParameterInteger("AutoMLMaxCandidates", default_value=25)
 AUTOML_TOTAL_RUNTIME  = ParameterInteger("AutoMLTotalRuntimeSec", default_value=3600)  # 1 hour per target
-AUTOML_MODE           = ParameterString("AutoMLMode", default_value="ENSEMBLING")      # best accuracy in most cases
 
 # -------------------------------
 # PREP STEP (Processing)
@@ -71,7 +70,7 @@ for tgt in TARGET_COLS:
         output_path=automl_output,
         problem_type="MulticlassClassification",
         job_objective={"MetricName": "Accuracy"},
-        mode=AUTOML_MODE,
+        mode="ENSEMBLING",
         max_candidates=AUTOML_MAX_CANDIDATES,
         total_job_runtime_in_seconds=AUTOML_TOTAL_RUNTIME,
         sagemaker_session=pipeline_session,
