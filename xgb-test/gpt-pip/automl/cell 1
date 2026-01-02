@@ -1,30 +1,32 @@
 import os
 import json
+import re
 import boto3
 import sagemaker
 
 from sagemaker import get_execution_role
 from sagemaker.workflow.pipeline_context import PipelineSession
 from sagemaker.workflow.pipeline import Pipeline
+from sagemaker.workflow.parameters import ParameterInteger
 from sagemaker.workflow.steps import ProcessingStep
 from sagemaker.workflow.functions import Join
-from sagemaker.workflow.parameters import ParameterInteger, ParameterString
 
 from sagemaker.processing import ScriptProcessor, ProcessingInput, ProcessingOutput
-from sagemaker.workflow.automl_step import AutoMLStep
-from sagemaker.automl.automl import AutoML, AutoMLInput
 
-# --- Region / sessions / role ---
+from sagemaker.automl.automl import AutoML, AutoMLInput
+from sagemaker.workflow.automl_step import AutoMLStep
+from sagemaker.workflow.retry import StepRetryPolicy, StepExceptionTypeEnum
+
+# ---------- AWS context ----------
 region = boto3.Session().region_name
 sm_session = sagemaker.Session()
 pipeline_session = PipelineSession()
 role = get_execution_role()
 
-# --- Project config ---
+# ---------- Project config ----------
 BUCKET = sm_session.default_bucket()
-PROJECT_PREFIX = "multi-target-automl"
+PROJECT_PREFIX = "multi-target-automl"  # change if you want
 INPUT_S3 = f"s3://{BUCKET}/{PROJECT_PREFIX}/input/data.csv"
-OUTPUT_PREFIX = f"s3://{BUCKET}/{PROJECT_PREFIX}"
 
 TARGET_COLS = ["DepartmentCode", "AccountCode", "SubAccountCode", "LocationCode"]
 INPUT_FEATURES = ["VendorName", "LineDescription", "ClubNumber"]
@@ -32,3 +34,18 @@ INPUT_FEATURES = ["VendorName", "LineDescription", "ClubNumber"]
 print("Region:", region)
 print("Bucket:", BUCKET)
 print("Input:", INPUT_S3)
+print("Targets:", TARGET_COLS)
+print("Features:", INPUT_FEATURES)
+
+def safe_name(s: str, max_len: int = 45) -> str:
+    """
+    SageMaker job/step-name safe:
+    - letters, numbers, hyphens only
+    - must start with a letter
+    - no underscores
+    """
+    s = re.sub(r"[^A-Za-z0-9-]+", "-", str(s))
+    s = re.sub(r"-{2,}", "-", s).strip("-")
+    if not s or not s[0].isalpha():
+        s = "a-" + s
+    return s[:max_len].rstrip("-")

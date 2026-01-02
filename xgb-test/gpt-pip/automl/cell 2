@@ -3,20 +3,15 @@ import argparse
 import os
 import glob
 import json
-import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
+import numpy as np
+import csv
 
 def valid_target_mask(series: pd.Series) -> pd.Series:
-    s = series
-    s_str = s.astype(str).str.strip()
+    s_str = series.astype(str).str.strip()
     missing_values = {"", "nan", "NaN", "none", "None", "null", "NULL"}
-    missing = s.isna() | s_str.isin(missing_values)
+    missing = series.isna() | s_str.isin(missing_values)
     return ~missing
-
-def can_stratify(y: np.ndarray, min_per_class: int = 2) -> bool:
-    _, counts = np.unique(y, return_counts=True)
-    return (counts.min() >= min_per_class)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -24,12 +19,12 @@ if __name__ == "__main__":
     parser.add_argument("--targets", required=True)           # json list
     parser.add_argument("--input_features", required=True)    # json list
     parser.add_argument("--output_dir", required=True)
-    parser.add_argument("--test_size", type=float, default=0.2)
     parser.add_argument("--random_state", type=int, default=42)
     args = parser.parse_args()
 
     targets = json.loads(args.targets)
     feats = json.loads(args.input_features)
+
     os.makedirs(args.output_dir, exist_ok=True)
 
     csv_files = glob.glob(os.path.join(args.input_dir, "*.csv"))
@@ -43,12 +38,14 @@ if __name__ == "__main__":
     if missing_cols:
         raise ValueError(f"Missing required columns: {missing_cols}")
 
-    # Basic feature cleanup (keep it simple; Autopilot will handle encodings internally)
+    # Normalize feature columns (simple + safe; Autopilot handles encodings)
     for c in feats:
         if df[c].dtype == object:
             df[c] = df[c].fillna("").astype(str)
         else:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+    rng = np.random.default_rng(args.random_state)
 
     for tgt in targets:
         print("-" * 60)
@@ -62,27 +59,25 @@ if __name__ == "__main__":
             print(f"[prep] Skipping {tgt}: no valid rows")
             continue
 
-        # Stratify when feasible (classification-like targets)
-        y = df_t[tgt].astype(str).values
-        stratify = y if can_stratify(y) else None
-
-        train_df, val_df = train_test_split(
-            df_t,
-            test_size=args.test_size,
-            random_state=args.random_state,
-            shuffle=True,
-            stratify=stratify,
-        )
+        # Shuffle once (Autopilot will do its own split)
+        idx = np.arange(len(df_t))
+        rng.shuffle(idx)
+        df_t = df_t.iloc[idx].reset_index(drop=True)
 
         out_dir = os.path.join(args.output_dir, tgt)
         os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, "train.csv")
 
-        train_path = os.path.join(out_dir, "train.csv")
-        val_path = os.path.join(out_dir, "val.csv")
-        train_df.to_csv(train_path, index=False)
-        val_df.to_csv(val_path, index=False)
+        # Hardened CSV writing (prevents downstream parsing instability)
+        df_t.to_csv(
+            out_path,
+            index=False,
+            encoding="utf-8",
+            quoting=csv.QUOTE_ALL,
+            escapechar="\\",
+            lineterminator="\n",
+        )
 
-        print(f"[prep] Wrote: {train_path} rows={len(train_df)}")
-        print(f"[prep] Wrote: {val_path} rows={len(val_df)}")
+        print(f"[prep] Wrote: {out_path} rows={len(df_t)}")
 
     print("✅ Autopilot-prep complete")

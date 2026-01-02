@@ -1,11 +1,11 @@
 # -------------------------------
-# Pipeline parameters (optional)
+# Pipeline parameters
 # -------------------------------
-AUTOML_MAX_CANDIDATES = ParameterInteger("AutoMLMaxCandidates", default_value=25)
-AUTOML_TOTAL_RUNTIME  = ParameterInteger("AutoMLTotalRuntimeSec", default_value=3600)  # 1 hour per target
+AUTOML_MAX_CANDIDATES = ParameterInteger("AutoMLMaxCandidates", default_value=15)
+AUTOML_TOTAL_RUNTIME  = ParameterInteger("AutoMLTotalRuntimeSec", default_value=3600)  # per target (seconds)
 
 # -------------------------------
-# PREP STEP (Processing)
+# PREP STEP
 # -------------------------------
 prep_processor = ScriptProcessor(
     image_uri=sagemaker.image_uris.retrieve("sklearn", region, version="1.2-1"),
@@ -41,7 +41,6 @@ step_prep = ProcessingStep(
         "--targets", json.dumps(TARGET_COLS),
         "--input_features", json.dumps(INPUT_FEATURES),
         "--output_dir", "/opt/ml/processing/output",
-        "--test_size", "0.2",
         "--random_state", "42",
     ],
 )
@@ -49,55 +48,59 @@ step_prep = ProcessingStep(
 prep_uri = step_prep.properties.ProcessingOutputConfig.Outputs["prep"].S3Output.S3Uri
 
 # -------------------------------
+# AutoML retry policy (internal errors)
+# -------------------------------
+retry_policy = StepRetryPolicy(
+    exception_types=[StepExceptionTypeEnum.SAGEMAKER_INTERNAL_ERROR],
+    interval_seconds=120,
+    max_attempts=3,
+    backoff_rate=2.0,
+)
+
+# -------------------------------
 # AutoML TRAIN (per target)
 # -------------------------------
 automl_steps = []
 
 for tgt in TARGET_COLS:
-    # Each target gets its own Autopilot job output location
-    automl_output = f"s3://{BUCKET}/{PROJECT_PREFIX}/automl-output/{tgt}"
+    tgt_safe = safe_name(tgt.lower(), max_len=22)
+    project_safe = safe_name(PROJECT_PREFIX.lower(), max_len=18)
 
-    # Build S3 paths to the prep outputs for this target
+    automl_output = f"s3://{BUCKET}/{PROJECT_PREFIX}/automl-output/{tgt_safe}"
+
+    # Training data produced by prep step
     train_s3 = Join(on="/", values=[prep_uri, tgt, "train.csv"])
-    val_s3   = Join(on="/", values=[prep_uri, tgt, "val.csv"])
 
-    # Autopilot job config (SDK AutoML object)
-    # - problem_type: use multiclass; if one of your targets is actually binary, Autopilot can still handle it.
-    # - mode: ENSEMBLING is what AutoMLStep supports for native step usage per AWS guidance. :contentReference[oaicite:3]{index=3}
     automl = AutoML(
         role=role,
         target_attribute_name=tgt,
         output_path=automl_output,
+        mode="ENSEMBLING",  # REQUIRED for AutoMLStep
         problem_type="MulticlassClassification",
         job_objective={"MetricName": "Accuracy"},
-        mode="ENSEMBLING",
         max_candidates=AUTOML_MAX_CANDIDATES,
         total_job_runtime_in_seconds=AUTOML_TOTAL_RUNTIME,
+        base_job_name=f"{project_safe}-{tgt_safe}",  # keep it short & safe
         sagemaker_session=pipeline_session,
     )
 
-
+    # IMPORTANT: training channel ONLY (no validation channel for AutoMLStep robustness)
     automl_inputs = [
         AutoMLInput(
             inputs=train_s3,
             target_attribute_name=tgt,
             channel_type="training",
-            content_type="text/csv",
-        ),
-        AutoMLInput(
-            inputs=val_s3,
-            target_attribute_name=tgt,
-            channel_type="validation",
-            content_type="text/csv",
-        ),
+            content_type="text/csv;header=present",
+        )
     ]
 
     step_args = automl.fit(inputs=automl_inputs)
 
     step_automl = AutoMLStep(
-        name=f"AutoML-{tgt}",
+        name=f"AutoML-{tgt_safe}",     # no underscores
         step_args=step_args,
         depends_on=[step_prep],
+        retry_policies=[retry_policy],
     )
 
     automl_steps.append(step_automl)
@@ -106,11 +109,11 @@ for tgt in TARGET_COLS:
 # PIPELINE (train-only)
 # -------------------------------
 pipeline = Pipeline(
-    name="MultiTarget-Autopilot-TrainOnly",
+    name=safe_name(f"{PROJECT_PREFIX}-train-only", max_len=80),
     parameters=[AUTOML_MAX_CANDIDATES, AUTOML_TOTAL_RUNTIME],
     steps=[step_prep] + automl_steps,
     sagemaker_session=pipeline_session,
 )
 
 pipeline.upsert(role_arn=role)
-print("✅ Autopilot train-only pipeline upserted:", pipeline.name)
+print("✅ Pipeline upserted:", pipeline.name)
