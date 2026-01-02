@@ -95,7 +95,7 @@ for tgt in TARGET_COLS:
     step_args = automl.fit(inputs=automl_inputs)
 
     step_automl = AutoMLStep(
-        name=f"AutoML_{tgt}",
+        name=f"AutoML-{tgt}",
         step_args=step_args,
         depends_on=[step_prep],
     )
@@ -107,7 +107,7 @@ for tgt in TARGET_COLS:
 # -------------------------------
 pipeline = Pipeline(
     name="MultiTarget-Autopilot-TrainOnly",
-    parameters=[AUTOML_MAX_CANDIDATES, AUTOML_TOTAL_RUNTIME, AUTOML_MODE],
+    parameters=[AUTOML_MAX_CANDIDATES, AUTOML_TOTAL_RUNTIME],
     steps=[step_prep] + automl_steps,
     sagemaker_session=pipeline_session,
 )
