@@ -1,5 +1,4 @@
 %%writefile train.py
-import json
 import xgboost as xgb
 import os
 import numpy as np
@@ -16,9 +15,8 @@ def main():
     y_train = dtrain.get_label()
     y_val   = dval.get_label()
 
-    # Labels are already encoded to 0..K-1 in preprocess.py
-    all_labels = np.unique(np.concatenate([y_train, y_val]))
-    num_class = len(all_labels)
+    # contiguous 0..K-1 -> max+1 is safe
+    num_class = int(max(y_train.max(initial=0), y_val.max(initial=0))) + 1
 
     params = {
         "objective": "multi:softprob",

@@ -1,58 +1,99 @@
 %%writefile combine_models.py
-import os, tarfile, tempfile, glob, json
-import boto3
+import os
+import tarfile
+import argparse
+import shutil
+import glob
+
+def extract_single_model(model_tar_path, dst_dir):
+    os.makedirs(dst_dir, exist_ok=True)
+    with tarfile.open(model_tar_path, "r:gz") as tar:
+        tar.extractall(dst_dir)
 
 def main():
-    import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mme_input")
-    parser.add_argument("--output_dir")
-    parser.add_argument("--bucket")
-    parser.add_argument("--combined_prefix")
+    parser.add_argument("--models_in_dir", required=True)     # local mount of trained model outputs
+    parser.add_argument("--preprocess_dir", required=True)    # local mount of preprocess output
+    parser.add_argument("--output_dir", required=True)
+    parser.add_argument("--targets", required=True)           # comma-separated target names
     args = parser.parse_args()
 
-    s3 = boto3.client("s3")
+    targets = [t.strip() for t in args.targets.split(",") if t.strip()]
+    os.makedirs(args.output_dir, exist_ok=True)
 
-    tmp_root = tempfile.mkdtemp()
-    models_dir = os.path.join(tmp_root, "models")
-    os.makedirs(models_dir, exist_ok=True)
+    tmp_root = "/opt/ml/processing/tmp_combine"
+    if os.path.exists(tmp_root):
+        shutil.rmtree(tmp_root)
+    os.makedirs(tmp_root, exist_ok=True)
 
-    # List all per-target .tar.gz
-    paginator = s3.get_paginator("list_objects_v2")
-    page_iter = paginator.paginate(
-        Bucket=args.bucket,
-        Prefix=args.mme_input
-    )
+    final_models_root = os.path.join(tmp_root, "models")
+    os.makedirs(final_models_root, exist_ok=True)
 
-    tars = []
-    for page in page_iter:
-        for obj in page.get("Contents", []):
-            if obj["Key"].endswith(".tar.gz"):
-                tars.append(obj["Key"])
+    # Copy shared preprocess artifacts once (meta + labelenc_*.pkl)
+    preprocess_meta = os.path.join(args.preprocess_dir, "preprocess_meta.json")
+    labelenc_files = glob.glob(os.path.join(args.preprocess_dir, "labelenc_*.pkl"))
+    if not os.path.exists(preprocess_meta):
+        raise FileNotFoundError(f"Missing preprocess_meta.json at {preprocess_meta}")
 
-    if not tars:
-        raise RuntimeError("No model tars found")
+    for tgt in targets:
+        tgt_out = os.path.join(final_models_root, tgt)
+        code_out = os.path.join(tgt_out, "code")
+        os.makedirs(code_out, exist_ok=True)
 
-    print("Found model tars:", tars)
+        # 1) Find training model.tar.gz for this target under models_in_dir
+        # SageMaker XGBoost estimator output structure commonly:
+        # <models_in_dir>/<tgt>/Train_<tgt>/output/model.tar.gz OR <models_in_dir>/<tgt>/output/model.tar.gz
+        candidates = glob.glob(os.path.join(args.models_in_dir, "**", tgt, "**", "model.tar.gz"), recursive=True)
+        candidates += glob.glob(os.path.join(args.models_in_dir, "**", f"*{tgt}*", "**", "model.tar.gz"), recursive=True)
 
-    # Extract each into /models/<target>/
-    for key in tars:
-        tgt = os.path.splitext(os.path.basename(key))[0]
-        tgt_dir = os.path.join(models_dir, tgt)
-        os.makedirs(tgt_dir, exist_ok=True)
+        model_tar = None
+        for c in candidates:
+            if c.endswith("model.tar.gz"):
+                model_tar = c
+                break
+        if model_tar is None:
+            raise FileNotFoundError(f"Could not find model.tar.gz for target={tgt} under {args.models_in_dir}")
 
-        local_tar = os.path.join(tmp_root, os.path.basename(key))
-        s3.download_file(args.bucket, key, local_tar)
+        # 2) Extract training tar and copy xgboost-model
+        extract_dir = os.path.join(tmp_root, f"extract_{tgt}")
+        if os.path.exists(extract_dir):
+            shutil.rmtree(extract_dir)
+        os.makedirs(extract_dir, exist_ok=True)
+        extract_single_model(model_tar, extract_dir)
 
-        with tarfile.open(local_tar, "r:gz") as tar:
-            tar.extractall(tgt_dir)
+        booster_path = os.path.join(extract_dir, "xgboost-model")
+        if not os.path.exists(booster_path):
+            # fallback search
+            found = None
+            for root, _, files in os.walk(extract_dir):
+                if "xgboost-model" in files:
+                    found = os.path.join(root, "xgboost-model")
+                    break
+            if found is None:
+                raise FileNotFoundError(f"xgboost-model not found inside {model_tar}")
+            booster_path = found
 
-    # Create combined tar
+        shutil.copy(booster_path, os.path.join(tgt_out, "xgboost-model"))
+
+        # 3) Copy preprocess artifacts into code/
+        shutil.copy(preprocess_meta, os.path.join(code_out, "preprocess_meta.json"))
+        for enc in labelenc_files:
+            shutil.copy(enc, code_out)
+
+        # 4) Copy per-target label_map.json
+        label_map_src = os.path.join(args.preprocess_dir, tgt, "label_map.json")
+        if not os.path.exists(label_map_src):
+            raise FileNotFoundError(f"Missing label_map.json for {tgt} at {label_map_src}")
+        shutil.copy(label_map_src, os.path.join(code_out, "label_map.json"))
+
+        shutil.rmtree(extract_dir)
+
+    # 5) Create final model.tar.gz with models/ at root
     out_tar = os.path.join(args.output_dir, "model.tar.gz")
     with tarfile.open(out_tar, "w:gz") as tar:
-        tar.add(models_dir, arcname="models")
+        tar.add(final_models_root, arcname="models")
 
-    print("Combined model stored:", out_tar)
+    print("✅ Combined model stored:", out_tar)
 
 if __name__ == "__main__":
     main()

@@ -10,92 +10,59 @@ from sklearn.feature_extraction.text import HashingVectorizer
 from sklearn.preprocessing import LabelEncoder
 from scipy import sparse
 from sklearn.datasets import dump_svmlight_file
-
-# -----------------------------
-# Helpers
-# -----------------------------
+from sklearn.model_selection import train_test_split
 
 def valid_target_mask(series):
-    """
-    Return a boolean mask where the target value is considered *valid*.
-
-    Treated as MISSING (invalid for supervised training):
-      - NaN / None
-      - empty string ""
-      - "0", "0.0"
-      - textual placeholders: "nan", "NaN", "none", "None"
-      - "null", "NULL"
-      - whitespace-only values
-    """
-
     s = series
     s_str = s.astype(str).str.strip()
-
-    missing_values = {
-        "", "0", "0.0",
-        "nan", "NaN",
-        "none", "None",
-        "null", "NULL"
-    }
-
+    missing_values = {"", "nan", "NaN", "none", "None", "null", "NULL"}
     missing = s.isna() | s_str.isin(missing_values)
+    return ~missing
 
-    return ~missing  # True where target is real, not missing
-
-
-# -----------------------------
-# Argparse
-# -----------------------------
+def can_stratify(y, min_per_class=2):
+    # Need at least 2 samples per class for stratified splitting
+    _, counts = np.unique(y, return_counts=True)
+    return (counts.min() >= min_per_class)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--input_dir")
 parser.add_argument("--targets")
 parser.add_argument("--input_features")
 parser.add_argument("--output_dir")
-parser.add_argument("--tfidf_max_features")
+parser.add_argument("--hash_dim", type=int, default=2000)
+parser.add_argument("--test_size", type=float, default=0.2)
+parser.add_argument("--random_state", type=int, default=42)
 args = parser.parse_args()
 
 targets = json.loads(args.targets)
 input_features = json.loads(args.input_features)
 output_dir = args.output_dir
-hash_dim = int(args.tfidf_max_features)
+hash_dim = int(args.hash_dim)
 
 os.makedirs(output_dir, exist_ok=True)
 
-# -----------------------------
-# Load dataset
-# -----------------------------
 csv_files = glob.glob(os.path.join(args.input_dir, "*.csv"))
 if not csv_files:
-    raise FileNotFoundError("No CSV found")
+    raise FileNotFoundError("No CSV found in input_dir")
 
 df = pd.read_csv(csv_files[0])
-
 print(f"[preprocess] Loaded {csv_files[0]} with {len(df)} rows")
 
-# -----------------------------
-# Validate columns
-# -----------------------------
-missing = [c for c in input_features + targets if c not in df.columns]
-if missing:
-    raise ValueError(f"Missing required columns: {missing}")
+missing_cols = [c for c in input_features + targets if c not in df.columns]
+if missing_cols:
+    raise ValueError(f"Missing required columns: {missing_cols}")
 
-# -----------------------------
-# Build sparse feature blocks
-# -----------------------------
 feature_blocks = []
 feature_pipeline = []
 
 for feat in input_features:
     col = df[feat]
 
-    # TEXT → HASHING
+    # TEXT -> Hashing
     if col.dtype == object and (
-        "text" in feat.lower() or
-        "desc" in feat.lower() or
-        "line" in feat.lower()
+        "text" in feat.lower() or "desc" in feat.lower() or "line" in feat.lower()
     ):
-        print(f"[features] {feat}: treating as TEXT → HashingVectorizer({hash_dim})")
+        print(f"[features] {feat}: TEXT -> HashingVectorizer({hash_dim})")
         vec = HashingVectorizer(
             n_features=hash_dim,
             alternate_sign=False,
@@ -103,17 +70,12 @@ for feat in input_features:
         )
         X = vec.transform(col.fillna("").astype(str))
         feature_blocks.append(X)
-
-        feature_pipeline.append({
-            "name": feat,
-            "type": "hash",
-            "hash_dim": hash_dim
-        })
+        feature_pipeline.append({"name": feat, "type": "hash", "hash_dim": hash_dim})
         continue
 
-    # CATEGORICAL → LABELENC
+    # CATEGORICAL -> LabelEncoder (kept to match your current server)
     if col.dtype == object:
-        print(f"[features] {feat}: treating as CATEGORICAL → LabelEncoder")
+        print(f"[features] {feat}: CATEGORICAL -> LabelEncoder")
         enc = LabelEncoder()
         df[feat] = df[feat].fillna("").astype(str)
         encoded = enc.fit_transform(df[feat])
@@ -122,111 +84,76 @@ for feat in input_features:
 
         enc_file = f"labelenc_{feat}.pkl"
         joblib.dump(enc, os.path.join(output_dir, enc_file))
-
-        feature_pipeline.append({
-            "name": feat,
-            "type": "labelenc",
-            "file": enc_file
-        })
+        feature_pipeline.append({"name": feat, "type": "labelenc", "file": enc_file})
         continue
 
     # NUMERIC
-    print(f"[features] {feat}: treating as NUMERIC")
+    print(f"[features] {feat}: NUMERIC")
     y = pd.to_numeric(col.fillna(0), errors="coerce").fillna(0).values.reshape(-1, 1)
     X = sparse.csr_matrix(y)
     feature_blocks.append(X)
+    feature_pipeline.append({"name": feat, "type": "numeric"})
 
-    feature_pipeline.append({
-        "name": feat,
-        "type": "numeric"
-    })
-
-# -----------------------------
-# Merge sparse blocks
-# -----------------------------
-print("[features] Merging feature blocks into sparse matrix")
+print("[features] Merging sparse blocks")
 X_full = sparse.hstack(feature_blocks).tocsr()
 
-# -----------------------------
-# Save metadata
-# -----------------------------
 meta = {"feature_pipeline": feature_pipeline, "targets": targets}
 meta_path = os.path.join(output_dir, "preprocess_meta.json")
 with open(meta_path, "w") as f:
     json.dump(meta, f, indent=2)
 print(f"[meta] Wrote {meta_path}")
 
-# -----------------------------
-# Per-target splitting (STILL SPARSE)
-# Unified approach: always encode targets to 0..K-1 via label_map.json
-# -----------------------------
+# Per-target outputs
 for tgt in targets:
     print("-" * 60)
-    print(f"[target] Processing target: {tgt}")
+    print(f"[target] {tgt}")
 
     col = df[tgt]
     mask_valid = valid_target_mask(col)
 
-    n_total = len(col)
-    n_valid = int(mask_valid.sum())
-    n_missing = n_total - n_valid
-
-    print(f"[target] Total rows:   {n_total}")
-    print(f"[target] Valid rows:   {n_valid}")
-    print(f"[target] Missing/0s:   {n_missing}")
-
-    if n_valid < 10:
-        print(f"[target] WARNING: only {n_valid} valid rows for {tgt}. "
-              f"Model may be very weak.")
-
-    # Filter to rows with a *real* target, treat EVERYTHING as string category
-    y_all_raw = df.loc[mask_valid, tgt].astype(str).values
+    y_raw = df.loc[mask_valid, tgt].astype(str).values
     X_t = X_full[mask_valid]
 
-    n = len(y_all_raw)
+    n = len(y_raw)
+    print(f"[target] Valid rows: {n} / {len(df)}")
+
     if n == 0:
-        print(f"[target] No valid rows after filtering for {tgt}, skipping.")
+        print(f"[target] No valid rows for {tgt}, skipping")
         continue
 
-    # --------------------------------------------------------------
-    # UNIFIED ENCODING: always map labels -> 0..K-1
-    # (works for numeric-looking and text labels equally)
-    # --------------------------------------------------------------
-    unique_labels = sorted(pd.unique(y_all_raw))
+    # Unified label mapping
+    unique_labels = sorted(pd.unique(y_raw))
     label_map = {str(lbl): int(i) for i, lbl in enumerate(unique_labels)}
-    y_all_num = np.array([label_map[str(lbl)] for lbl in y_all_raw], dtype=float)
+    y_num = np.array([label_map[str(lbl)] for lbl in y_raw], dtype=int)
 
     tgt_dir = os.path.join(output_dir, tgt)
     os.makedirs(tgt_dir, exist_ok=True)
 
-    # Save mapping for inference
-    map_path = os.path.join(tgt_dir, "label_map.json")
-    with open(map_path, "w") as f:
+    with open(os.path.join(tgt_dir, "label_map.json"), "w") as f:
         json.dump(label_map, f, indent=2)
-    print(f"[target] Saved label_map.json with {len(label_map)} entries to {map_path}")
 
-    # --------------------------------------------------------------
-    # 80/20 split using NUMERIC labels
-    # --------------------------------------------------------------
-    cut = int(n * 0.8)
-    if cut == 0:
-        cut = max(1, n - 1)  # ensure at least 1 train, 1 val if possible
+    stratify = y_num if can_stratify(y_num) else None
+    if stratify is None:
+        print("[split] Not stratifying (rare classes). Using random split.")
+    else:
+        print("[split] Stratified split enabled.")
 
-    X_train = X_t[:cut]
-    y_train = y_all_num[:cut]
-
-    X_val = X_t[cut:]
-    y_val = y_all_num[cut:]
-
-    print(f"[target] Train rows: {len(y_train)}, Val rows: {len(y_val)}")
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_t, y_num,
+        test_size=args.test_size,
+        random_state=args.random_state,
+        shuffle=True,
+        stratify=stratify
+    )
 
     train_path = os.path.join(tgt_dir, "train.libsvm")
-    val_path = os.path.join(tgt_dir, "val.libsvm")
+    val_path   = os.path.join(tgt_dir, "val.libsvm")
 
     dump_svmlight_file(X_train, y_train, train_path)
     dump_svmlight_file(X_val,   y_val,   val_path)
 
+    print(f"[target] Train={len(y_train)} Val={len(y_val)}")
     print(f"[target] Wrote {train_path}")
     print(f"[target] Wrote {val_path}")
 
-print("✅ Preprocess complete — all targets encoded via label_map.json")
+print("✅ Preprocess complete")
