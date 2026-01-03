@@ -1,0 +1,36 @@
+pipeline = Pipeline(
+    name="AutopilotMultiTargetPipeline",
+    parameters=[
+        p_bucket,
+        p_project,
+        p_input_s3,
+        p_targets,
+        p_features,
+        p_max_candidates,
+        p_max_runtime_per_job,
+        p_max_total_job,        # add this if you implemented it
+        p_training_mode,
+        p_problem_type,
+        p_objective_metric,
+        p_artifacts_root,
+    ],
+    steps=steps,
+    sagemaker_session=pipeline_session,
+)
+
+pipeline.upsert(role_arn=role)
+
+execution = pipeline.start(
+    parameters={
+        "InputS3Uri": f"s3://{sm_session.default_bucket()}/input-data/your_dataset.csv",
+        "ProjectPrefix": "autopilot-multi-target",
+        "MaxCandidates": 25,
+        "MaxRuntimePerJobSeconds": 3600,
+        "MaxTotalJobSeconds": 10800,
+        "ProblemType": "MulticlassClassification",
+        "ObjectiveMetric": "Accuracy",
+        "TrainingMode": "AUTO",
+    }
+)
+
+print("Execution ARN:", execution.arn)

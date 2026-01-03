@@ -1,0 +1,23 @@
+import os
+import json
+import boto3
+import sagemaker
+
+from sagemaker.session import Session
+from sagemaker.workflow.pipeline_context import PipelineSession
+from sagemaker.workflow.pipeline import Pipeline
+from sagemaker.workflow.parameters import ParameterString, ParameterInteger
+from sagemaker.workflow.steps import ProcessingStep
+from sagemaker.workflow.automl_step import AutoMLStep
+from sagemaker.workflow.functions import Join
+from sagemaker.processing import ScriptProcessor, ProcessingInput, ProcessingOutput
+from sagemaker.workflow.step_collections import RegisterModel
+
+region = boto3.Session().region_name
+sm_session = Session()
+pipeline_session = PipelineSession()
+role = sagemaker.get_execution_role()
+
+print("Region:", region)
+print("Role:", role)
+print("Default bucket:", sm_session.default_bucket())

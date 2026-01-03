@@ -1,0 +1,60 @@
+%%writefile preprocess_targets.py
+import os
+import io
+import json
+import boto3
+import pandas as pd
+
+def _parse_csv_list(s: str):
+    return [x.strip() for x in s.split(",") if x.strip()]
+
+def main():
+    input_s3 = os.environ["INPUT_S3_URI"]
+    targets = _parse_csv_list(os.environ["TARGET_COLS"])
+    features = _parse_csv_list(os.environ["INPUT_FEATURES"])
+    out_dir = os.environ.get("OUTPUT_DIR", "/opt/ml/processing/output")
+
+    # Parse s3://bucket/key
+    assert input_s3.startswith("s3://"), f"INPUT_S3_URI must be s3://..., got {input_s3}"
+    _, _, bucket, *key_parts = input_s3.split("/")
+    key = "/".join(key_parts)
+
+    s3 = boto3.client("s3")
+    obj = s3.get_object(Bucket=bucket, Key=key)
+    df = pd.read_csv(io.BytesIO(obj["Body"].read()))
+
+    missing_features = sorted(set(features) - set(df.columns))
+    missing_targets = sorted(set(targets) - set(df.columns))
+    if missing_features or missing_targets:
+        raise ValueError(
+            f"Missing columns. features={missing_features}, targets={missing_targets}. "
+            f"Found={list(df.columns)}"
+        )
+
+    manifest = {"input_s3": input_s3, "targets": {}, "row_count": int(df.shape[0])}
+
+    for t in targets:
+        cols = features + [t]
+        dft = df[cols].copy()
+        dft = dft.dropna(subset=[t])
+
+        target_dir = os.path.join(out_dir, t)
+        os.makedirs(target_dir, exist_ok=True)
+        out_path = os.path.join(target_dir, "train.csv")
+        dft.to_csv(out_path, index=False)
+
+        manifest["targets"][t] = {
+            "rows": int(dft.shape[0]),
+            "unique_labels": int(dft[t].nunique()),
+            "output_path": out_path
+        }
+
+    # Write manifest for debugging/auditing
+    with open(os.path.join(out_dir, "manifest.json"), "w") as f:
+        json.dump(manifest, f, indent=2)
+
+    print("Wrote per-target train CSVs:")
+    print(json.dumps(manifest, indent=2))
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,49 @@
+automl_steps = {}
+job_name_params = {}
+
+for t in TARGET_LIST:
+    # training CSV lands at: s3://.../prepared/<t>/train.csv
+    train_s3_uri = Join(
+        on="/",
+        values=[p_artifacts_root, p_project, "prepared", t, "train.csv"]
+    )
+
+    # Autopilot output path for this target
+    target_out = Join(
+        on="/",
+        values=[p_artifacts_root, p_project, "automl", t]
+    )
+
+    # AutoMLStep will generate a unique job name at execution time, but you can also
+    # supply a stable-ish prefix; leaving it to the step is often safer.
+    automl_step = AutoMLStep(
+        name=f"AutoML_{t}",
+        sagemaker_session=pipeline_session,
+        role=role,
+
+        # ---- AutoML V2 config ----
+        # V2 uses AutoMLJobInputDataConfig-like definition, but SDK handles shape.
+        input_data_config=[{
+            "DataSource": {"S3DataSource": {"S3DataType": "S3Prefix", "S3Uri": train_s3_uri}},
+            "TargetAttributeName": t
+        }],
+        output_data_config={"S3OutputPath": target_out},
+
+        # Completion criteria / cost controls
+        auto_ml_job_config={
+            "CompletionCriteria": {
+                "MaxCandidates": p_max_candidates,
+                "MaxRuntimePerTrainingJobInSeconds": p_max_runtime_per_job,
+                "MaxAutoMLJobRuntimeInSeconds": Join(on="", values=[p_max_runtime_per_job, ""])  # placeholder below
+            }
+        },
+
+        # Objective metric (Accuracy is fine, but see notes below)
+        auto_ml_job_objective={"MetricName": p_objective_metric},
+
+        # Problem type & mode
+        problem_type=p_problem_type,
+        # TrainingMode is SDK-dependent; we pass it via auto_ml_job_config where applicable.
+    )
+
+    automl_steps[t] = automl_step

@@ -1,0 +1,34 @@
+# ---- Pipeline Params ----
+p_bucket = ParameterString("Bucket", default_value=sm_session.default_bucket())
+p_project = ParameterString("ProjectPrefix", default_value="autopilot-multi-target")
+p_input_s3 = ParameterString(
+    "InputS3Uri",
+    default_value=f"s3://{sm_session.default_bucket()}/input-data/your_dataset.csv"
+)
+
+# Comma-separated so it can be a pipeline parameter; scripts will split(',')
+p_targets = ParameterString(
+    "TargetCols",
+    default_value="DepartmentCode,AccountCode,SubAccountCode,LocationCode"
+)
+
+p_features = ParameterString(
+    "InputFeatures",
+    default_value="VendorName,LineDescription,ClubNumber"
+)
+
+p_max_candidates = ParameterInteger("MaxCandidates", default_value=25)
+p_max_runtime_per_job = ParameterInteger("MaxRuntimePerJobSeconds", default_value=3600)
+p_max_total_job = ParameterInteger("MaxTotalJobSeconds", default_value=10800)
+
+p_training_mode = ParameterString("TrainingMode", default_value="AUTO")  # AUTO | ENSEMBLING | HPO
+
+# For multi-class problems, Autopilot can infer; you can also force it
+p_problem_type = ParameterString("ProblemType", default_value="MulticlassClassification")  # or "Auto"
+p_objective_metric = ParameterString("ObjectiveMetric", default_value="Accuracy")
+
+# Artifact root for pipeline outputs
+p_artifacts_root = ParameterString(
+    "ArtifactsRoot",
+    default_value=f"s3://{sm_session.default_bucket()}/autopilot-output"
+)
