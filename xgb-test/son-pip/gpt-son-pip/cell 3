@@ -1,4 +1,8 @@
-# ---- Processor ----
+import sagemaker
+from sagemaker.processing import ScriptProcessor, ProcessingOutput
+from sagemaker.workflow.steps import ProcessingStep
+from sagemaker.workflow.functions import Join
+
 processor = ScriptProcessor(
     image_uri=sagemaker.image_uris.retrieve("sklearn", region=region, version="1.2-1"),
     command=["python3"],
@@ -8,13 +12,13 @@ processor = ScriptProcessor(
     sagemaker_session=pipeline_session,
 )
 
-# ---- Declare outputs (one per target) ----
-TARGET_LIST = ["DepartmentCode", "AccountCode", "SubAccountCode", "LocationCode"]  # keep in sync w/ default param
+TARGET_LIST = ["DepartmentCode", "AccountCode", "SubAccountCode", "LocationCode"]
+
 processing_outputs = [
     ProcessingOutput(
         output_name="manifest",
-        source="/opt/ml/processing/output/manifest.json",
-        destination=Join(on="/", values=[p_artifacts_root, p_project, "prepared", "manifest"])
+        source="/opt/ml/processing/output/manifest",  # directory (NOT a file)
+        destination=Join(on="/", values=[p_artifacts_root, p_project, "prepared", "manifest"]),
     )
 ]
 
@@ -22,8 +26,8 @@ for t in TARGET_LIST:
     processing_outputs.append(
         ProcessingOutput(
             output_name=f"train_{t}",
-            source=f"/opt/ml/processing/output/{t}",
-            destination=Join(on="/", values=[p_artifacts_root, p_project, "prepared", t])
+            source=f"/opt/ml/processing/output/{t}",  # directory containing train.csv
+            destination=Join(on="/", values=[p_artifacts_root, p_project, "prepared", t]),
         )
     )
 
@@ -31,7 +35,6 @@ prep_step = ProcessingStep(
     name="PreparePerTargetDatasets",
     processor=processor,
     code="preprocess_targets.py",
-    job_arguments=[],
     env={
         "INPUT_S3_URI": p_input_s3,
         "TARGET_COLS": p_targets,

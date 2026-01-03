@@ -1,0 +1,38 @@
+from sagemaker.processing import ScriptProcessor, ProcessingOutput
+from sagemaker.workflow.steps import ProcessingStep
+from sagemaker.workflow.functions import Join
+
+evalreg_steps = {}
+
+evalreg_processor = ScriptProcessor(
+    image_uri=sagemaker.image_uris.retrieve("sklearn", region=region, version="1.2-1"),
+    command=["python3"],
+    role=role,
+    instance_count=1,
+    instance_type="ml.m5.large",
+    sagemaker_session=pipeline_session,
+)
+
+for t in TARGET_LIST:
+    out_dest = Join(on="/", values=[p_artifacts_root, p_project, "evaluation-and-registry", t])
+
+    step = ProcessingStep(
+        name=f"EvalAndRegister_{t}",
+        processor=evalreg_processor,
+        code="evaluate_and_register_automl.py",
+        env={
+            "AUTOML_JOB_NAME": automl_steps[t].properties.AutoMLJobName,
+            "TARGET_COL": t,
+            "MODEL_PACKAGE_GROUP": f"{p_project}-{t}".replace("_", "-"),
+            "APPROVAL_STATUS": "PendingManualApproval",
+            "OUTPUT_DIR": "/opt/ml/processing/output",
+        },
+        outputs=[
+            ProcessingOutput(
+                output_name=f"evalreg_{t}",
+                source="/opt/ml/processing/output",
+                destination=out_dest,
+            )
+        ],
+    )
+    evalreg_steps[t] = step

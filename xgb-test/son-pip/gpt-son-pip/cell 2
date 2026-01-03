@@ -14,7 +14,6 @@ def main():
     features = _parse_csv_list(os.environ["INPUT_FEATURES"])
     out_dir = os.environ.get("OUTPUT_DIR", "/opt/ml/processing/output")
 
-    # Parse s3://bucket/key
     assert input_s3.startswith("s3://"), f"INPUT_S3_URI must be s3://..., got {input_s3}"
     _, _, bucket, *key_parts = input_s3.split("/")
     key = "/".join(key_parts)
@@ -46,14 +45,15 @@ def main():
         manifest["targets"][t] = {
             "rows": int(dft.shape[0]),
             "unique_labels": int(dft[t].nunique()),
-            "output_path": out_path
+            "output_path": out_path,
         }
 
-    # Write manifest for debugging/auditing
-    with open(os.path.join(out_dir, "manifest.json"), "w") as f:
+    # IMPORTANT: write manifest into a DIRECTORY so ProcessingOutput can export it
+    manifest_dir = os.path.join(out_dir, "manifest")
+    os.makedirs(manifest_dir, exist_ok=True)
+    with open(os.path.join(manifest_dir, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)
 
-    print("Wrote per-target train CSVs:")
     print(json.dumps(manifest, indent=2))
 
 if __name__ == "__main__":

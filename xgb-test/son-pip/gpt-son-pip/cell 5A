@@ -1,0 +1,102 @@
+%%writefile evaluate_and_register_automl.py
+import os
+import json
+import boto3
+from datetime import datetime
+from botocore.exceptions import ClientError
+
+def _safe_get_best_container(best_candidate: dict):
+    # Try common shapes across accounts/versions
+    for key in ["InferenceContainers", "ContainerDefinitions"]:
+        if key in best_candidate and best_candidate[key]:
+            c0 = best_candidate[key][0]
+            image = c0.get("Image") or c0.get("ImageUri")
+            model_data = c0.get("ModelDataUrl") or c0.get("ModelDataUri")
+            if image and model_data:
+                return image, model_data
+    return None, None
+
+def _ensure_package_group(sm, group_name: str):
+    try:
+        sm.describe_model_package_group(ModelPackageGroupName=group_name)
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ["ValidationException", "ResourceNotFound"]:
+            sm.create_model_package_group(ModelPackageGroupName=group_name)
+        else:
+            raise
+
+def main():
+    job_name = os.environ["AUTOML_JOB_NAME"]
+    target = os.environ["TARGET_COL"]
+    pkg_group = os.environ["MODEL_PACKAGE_GROUP"]
+    approval = os.environ.get("APPROVAL_STATUS", "PendingManualApproval")
+
+    out_dir = os.environ.get("OUTPUT_DIR", "/opt/ml/processing/output")
+    os.makedirs(out_dir, exist_ok=True)
+
+    sm = boto3.client("sagemaker")
+    resp = sm.describe_auto_ml_job_v2(AutoMLJobName=job_name)
+
+    status = resp.get("AutoMLJobStatus")
+    best = resp.get("BestCandidate", {})
+
+    image_uri, model_data_url = _safe_get_best_container(best)
+    if not image_uri or not model_data_url:
+        # write evaluation and fail clearly
+        report = {
+            "target": target,
+            "job_name": job_name,
+            "status": status,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "error": "Could not locate inference container image/model_data in BestCandidate",
+            "best_candidate": best,
+        }
+        with open(os.path.join(out_dir, "evaluation.json"), "w") as f:
+            json.dump(report, f, indent=2, default=str)
+        raise RuntimeError(report["error"])
+
+    # Write evaluation report
+    report = {
+        "target": target,
+        "job_name": job_name,
+        "status": status,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "best_candidate": best,
+        "resolved": {"image_uri": image_uri, "model_data_url": model_data_url},
+    }
+    with open(os.path.join(out_dir, "evaluation.json"), "w") as f:
+        json.dump(report, f, indent=2, default=str)
+
+    # Register to Model Registry
+    _ensure_package_group(sm, pkg_group)
+
+    create_resp = sm.create_model_package(
+        ModelPackageGroupName=pkg_group,
+        ModelPackageDescription=f"Autopilot best model for target {target}. AutoMLJob={job_name}",
+        ModelApprovalStatus=approval,
+        InferenceSpecification={
+            "Containers": [
+                {
+                    "Image": image_uri,
+                    "ModelDataUrl": model_data_url,
+                }
+            ],
+            "SupportedContentTypes": ["text/csv", "application/json"],
+            "SupportedResponseMIMETypes": ["application/json"],
+        },
+        # Optional, but helps for deployment UX
+        # ValidationSpecification can be added later if you want automated approval criteria
+    )
+
+    out = {
+        "model_package_arn": create_resp["ModelPackageArn"],
+        "image_uri": image_uri,
+        "model_data_url": model_data_url,
+    }
+    with open(os.path.join(out_dir, "registration.json"), "w") as f:
+        json.dump(out, f, indent=2)
+
+    print(json.dumps(out, indent=2))
+
+if __name__ == "__main__":
+    main()

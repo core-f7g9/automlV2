@@ -1,3 +1,11 @@
+from sagemaker.workflow.pipeline import Pipeline
+
+steps = [prep_step]
+
+for t in TARGET_LIST:
+    steps.append(automl_steps[t])
+    steps.append(evalreg_steps[t])
+
 pipeline = Pipeline(
     name="AutopilotMultiTargetPipeline",
     parameters=[
@@ -8,7 +16,7 @@ pipeline = Pipeline(
         p_features,
         p_max_candidates,
         p_max_runtime_per_job,
-        p_max_total_job,        # add this if you implemented it
+        p_max_total_job,
         p_training_mode,
         p_problem_type,
         p_objective_metric,
@@ -27,7 +35,7 @@ execution = pipeline.start(
         "MaxCandidates": 25,
         "MaxRuntimePerJobSeconds": 3600,
         "MaxTotalJobSeconds": 10800,
-        "ProblemType": "MulticlassClassification",
+        "ProblemType": "MulticlassClassification",  # if your SDK rejects, change to "Auto"
         "ObjectiveMetric": "Accuracy",
         "TrainingMode": "AUTO",
     }
