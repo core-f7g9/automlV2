@@ -292,9 +292,14 @@ def run_autopilot_pipeline():
     # Step 3: Launch Autopilot jobs for each target
     print(f"\n[Step 3] Launching Autopilot jobs...")
     
+    # Create shorter timestamp for job names (max 32 chars)
+    short_timestamp = datetime.now().strftime('%m%d%H%M')
+    
     job_info = {}
-    for target_col in TARGET_COLS:
-        job_name = f"autopilot-{target_col.lower()}-{timestamp}"
+    for idx, target_col in enumerate(TARGET_COLS):
+        # Shorten target name and create job name under 32 chars
+        target_short = target_col[:8].lower().replace('_', '')
+        job_name = f"aml-{target_short}-{short_timestamp}-{idx}"
         output_s3_path = f"s3://{BUCKET_NAME}/{OUTPUT_PREFIX}/jobs/{job_name}"
         
         try:
