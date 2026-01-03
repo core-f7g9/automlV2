@@ -1,690 +1,396 @@
 """
-SageMaker Studio Notebook: Multi-Model XGBoost Pipeline
-Run this notebook cell-by-cell in SageMaker Studio
+SageMaker Autopilot Pipeline for Multi-Class Classification with Multiple Targets
+This pipeline trains separate models for each target column dynamically
 """
-
-# ============================================================================
-# CELL 1: Install Dependencies & Imports
-# ============================================================================
-
-# Install required packages (run once)
-!pip install -q sagemaker==2.200.0 xgboost==1.7.6 scikit-learn pandas numpy
 
 import boto3
 import sagemaker
-from sagemaker import get_execution_role
-from sagemaker.xgboost import XGBoost
-from sagemaker.sklearn.processing import SKLearnProcessor
-from sagemaker.processing import ProcessingInput, ProcessingOutput
-from sagemaker.workflow.pipeline import Pipeline
-from sagemaker.workflow.steps import ProcessingStep, TrainingStep
-from sagemaker.inputs import TrainingInput
-from sagemaker.multidatamodel import MultiDataModel
-import json
+from sagemaker import AutoML
+from sagemaker.session import Session
 import pandas as pd
-import numpy as np
+import time
 from datetime import datetime
-import os
-import tarfile
-import pickle
-
-print("✅ Imports complete")
+import json
 
 # ============================================================================
-# CELL 2: Configuration
+# CONFIGURATION - Modify these parameters
 # ============================================================================
 
-# Initialize SageMaker session
-sess = sagemaker.Session()
-role = get_execution_role()  # Automatically gets your Studio execution role
-bucket = sess.default_bucket()  # Creates/uses default bucket
-region = sess.boto_region_name
-
-print(f"SageMaker Role: {role}")
-print(f"S3 Bucket: {bucket}")
-print(f"Region: {region}")
-
-# Configuration
-PREFIX = 'invoice-classification'
-TARGET_FIELDS = [
-    'invoice_category',
-    'vendor_type', 
-    'payment_status',
-    'approval_status',
-    'urgency_level'
-]
+# Define your target columns and input features
+TARGET_COLS = ["DepartmentCode", "AccountCode", "SubAccountCode", "LocationCode"]
+INPUT_FEATURES = ["VendorName", "LineDescription", "ClubNumber"]
 
 # S3 paths
-DATA_S3_PATH = f's3://{bucket}/{PREFIX}/data/'
-MODELS_S3_PREFIX = f's3://{bucket}/{PREFIX}/models/'
-MME_MODEL_PATH = f's3://{bucket}/{PREFIX}/mme/'
+BUCKET_NAME = "your-bucket-name"  # Replace with your S3 bucket
+INPUT_DATA_PREFIX = "input-data"  # S3 prefix where your CSV is stored
+OUTPUT_PREFIX = "autopilot-output"  # S3 prefix for outputs
 
-# Instance types (you can change these)
-PROCESSING_INSTANCE = 'ml.m5.xlarge'
-TRAINING_INSTANCE = 'ml.m5.xlarge'
-INFERENCE_INSTANCE = 'ml.m5.xlarge'
+# Dataset file name
+DATASET_FILE = "your_dataset.csv"  # Replace with your CSV file name
 
-print(f"\n✅ Configuration complete")
-print(f"Data will be stored in: {DATA_S3_PATH}")
+# AutoML Job Configuration
+MAX_CANDIDATES = 50  # Maximum number of model candidates per target
+MAX_RUNTIME_PER_JOB = 3600  # Max runtime per job in seconds (1 hour)
+PROBLEM_TYPE = "MulticlassClassification"  # Can be auto-detected or specified
+OBJECTIVE_METRIC = "Accuracy"  # Metric for multi-class classification
+
+# Training mode: 'ENSEMBLING' (fast, <100MB), 'HPO' (larger datasets), or 'AUTO'
+TRAINING_MODE = "AUTO"
+
+# IAM Role - SageMaker execution role
+ROLE = sagemaker.get_execution_role()
 
 # ============================================================================
-# CELL 3: Upload Sample Data (or use your own)
+# INITIALIZE AWS CLIENTS
 # ============================================================================
 
-# Create sample invoice dataset
-# Replace this with your actual data upload
-def create_sample_data():
-    """Create sample invoice data for testing"""
-    np.random.seed(42)
-    n_samples = 1000
-    
-    data = {
-        'invoice_id': [f'INV-{i:05d}' for i in range(n_samples)],
-        'amount': np.random.uniform(100, 10000, n_samples),
-        'vendor_name': np.random.choice(['TechCorp', 'OfficeSupply', 'Travel Co', 'Consulting Inc'], n_samples),
-        'department': np.random.choice(['IT', 'HR', 'Finance', 'Operations'], n_samples),
-        'line_items_count': np.random.randint(1, 10, n_samples),
-        'tax_amount': np.random.uniform(10, 1000, n_samples),
-        'days_outstanding': np.random.randint(0, 90, n_samples),
-        
-        # Target fields
-        'invoice_category': np.random.choice(['Office', 'IT', 'Travel', 'Consulting', 'Utilities'], n_samples),
-        'vendor_type': np.random.choice(['Supplier', 'Contractor', 'Partner', 'Consultant'], n_samples),
-        'payment_status': np.random.choice(['Paid', 'Unpaid'], n_samples),
-        'approval_status': np.random.choice(['Approved', 'Rejected'], n_samples),
-        'urgency_level': np.random.choice(['Low', 'Medium', 'High', 'Critical'], n_samples)
-    }
-    
-    df = pd.DataFrame(data)
-    return df
-
-# Create and upload data
-df = create_sample_data()
-print(f"Sample data shape: {df.shape}")
-print(f"\nFirst few rows:")
-print(df.head())
-
-# Save locally then upload to S3
-local_data_path = 'invoices.csv'
-df.to_csv(local_data_path, index=False)
-
-# Upload to S3
+sm_client = boto3.client('sagemaker')
 s3_client = boto3.client('s3')
-s3_client.upload_file(
-    local_data_path,
-    bucket,
-    f'{PREFIX}/data/invoices.csv'
-)
+sagemaker_session = Session()
 
-print(f"\n✅ Data uploaded to: {DATA_S3_PATH}invoices.csv")
+print(f"Using SageMaker role: {ROLE}")
+print(f"Default S3 bucket: {BUCKET_NAME}")
+print(f"Region: {sagemaker_session.boto_region_name}")
 
 # ============================================================================
-# CELL 4: Create Preprocessing Script
+# HELPER FUNCTIONS
 # ============================================================================
 
-preprocessing_code = '''
-import argparse
-import os
-import pandas as pd
-import numpy as np
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.model_selection import train_test_split
-import pickle
-import json
+def wait_for_autopilot_job(job_name, check_interval=60):
+    """
+    Monitor AutoML job status until completion
+    """
+    print(f"\nMonitoring job: {job_name}")
+    
+    while True:
+        response = sm_client.describe_auto_ml_job(AutoMLJobName=job_name)
+        status = response['AutoMLJobStatus']
+        secondary_status = response.get('AutoMLJobSecondaryStatus', 'N/A')
+        
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f"[{timestamp}] Status: {status} | Secondary: {secondary_status}")
+        
+        if status in ['Completed', 'Failed', 'Stopped']:
+            if status == 'Completed':
+                print(f"\n✓ Job {job_name} completed successfully!")
+                best_candidate = response.get('BestCandidate')
+                if best_candidate:
+                    metric_name = best_candidate['FinalAutoMLJobObjectiveMetric']['MetricName']
+                    metric_value = best_candidate['FinalAutoMLJobObjectiveMetric']['Value']
+                    print(f"  Best {metric_name}: {metric_value:.4f}")
+                    print(f"  Best Candidate: {best_candidate['CandidateName']}")
+                return response
+            else:
+                failure_reason = response.get('FailureReason', 'Unknown')
+                print(f"\n✗ Job {job_name} ended with status: {status}")
+                print(f"  Reason: {failure_reason}")
+                return response
+        
+        time.sleep(check_interval)
 
-def preprocess_data(input_path, output_path, target_field):
-    """Preprocess invoice data for specific target field"""
+
+def get_column_info(df, target_col):
+    """
+    Get information about target column for problem type inference
+    """
+    unique_values = df[target_col].nunique()
+    print(f"\nTarget column '{target_col}' statistics:")
+    print(f"  Unique values: {unique_values}")
+    print(f"  Missing values: {df[target_col].isnull().sum()}")
+    print(f"  Sample values: {df[target_col].unique()[:10].tolist()}")
+    return unique_values
+
+
+def prepare_dataset_for_target(df, target_col, input_features, output_path):
+    """
+    Prepare dataset with specific target and input features
+    Returns S3 path of prepared dataset
+    """
+    # Select input features and target column
+    columns_to_keep = input_features + [target_col]
+    df_target = df[columns_to_keep].copy()
     
-    print(f"Processing target field: {target_field}")
+    # Remove rows with missing target values
+    df_target = df_target.dropna(subset=[target_col])
     
-    # Load data
-    df = pd.read_csv(os.path.join(input_path, 'invoices.csv'))
-    print(f"Loaded {len(df)} rows")
+    print(f"\nPreparing dataset for target: {target_col}")
+    print(f"  Shape: {df_target.shape}")
+    print(f"  Features: {input_features}")
     
-    # Remove rows with missing target
-    df = df.dropna(subset=[target_field])
+    # Save to local CSV
+    local_file = f"train_{target_col}.csv"
+    df_target.to_csv(local_file, index=False, header=True)
     
-    # Separate features and target
-    y = df[target_field]
-    
-    # Drop all target columns and ID
-    cols_to_drop = ['invoice_category', 'vendor_type', 'payment_status', 
-                    'approval_status', 'urgency_level', 'invoice_id']
-    X = df.drop(columns=[col for col in df.columns if col in cols_to_drop])
-    
-    print(f"Features shape: {X.shape}")
-    
-    # Handle categorical features
-    categorical_cols = X.select_dtypes(include=['object']).columns.tolist()
-    numerical_cols = X.select_dtypes(include=[np.number]).columns.tolist()
-    
-    print(f"Categorical: {categorical_cols}")
-    print(f"Numerical: {numerical_cols}")
-    
-    # Encode categorical features
-    label_encoders = {}
-    for col in categorical_cols:
-        le = LabelEncoder()
-        X[col] = le.fit_transform(X[col].astype(str))
-        label_encoders[col] = le
-    
-    # Scale numerical features
-    scaler = StandardScaler()
-    if numerical_cols:
-        X[numerical_cols] = scaler.fit_transform(X[numerical_cols])
-    
-    # Encode target
-    target_encoder = LabelEncoder()
-    y_encoded = target_encoder.fit_transform(y)
-    
-    print(f"Number of classes: {len(target_encoder.classes_)}")
-    print(f"Classes: {target_encoder.classes_}")
-    
-    # Split data
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y_encoded, test_size=0.2, random_state=42, stratify=y_encoded
+    # Upload to S3
+    s3_path = f"s3://{BUCKET_NAME}/{output_path}/{local_file}"
+    sagemaker_session.upload_data(
+        path=local_file,
+        bucket=BUCKET_NAME,
+        key_prefix=output_path
     )
     
-    # Save in XGBoost format (label in first column, no header)
-    train_data = pd.DataFrame(y_train, columns=['label'])
-    train_data = pd.concat([train_data, X_train.reset_index(drop=True)], axis=1)
+    print(f"  Uploaded to: {s3_path}")
+    return s3_path, df_target.shape[0]
+
+
+def create_autopilot_job(target_col, input_s3_path, output_s3_path, job_name):
+    """
+    Create and launch an Autopilot job for a specific target
+    """
+    print(f"\n{'='*80}")
+    print(f"Creating Autopilot job: {job_name}")
+    print(f"{'='*80}")
     
-    test_data = pd.DataFrame(y_test, columns=['label'])
-    test_data = pd.concat([test_data, X_test.reset_index(drop=True)], axis=1)
+    # Input data configuration
+    input_data_config = [{
+        'DataSource': {
+            'S3DataSource': {
+                'S3DataType': 'S3Prefix',
+                'S3Uri': input_s3_path
+            }
+        },
+        'TargetAttributeName': target_col
+    }]
     
-    # Create output directories
-    train_dir = os.path.join(output_path, 'train')
-    test_dir = os.path.join(output_path, 'test')
-    metadata_dir = os.path.join(output_path, 'metadata')
-    
-    os.makedirs(train_dir, exist_ok=True)
-    os.makedirs(test_dir, exist_ok=True)
-    os.makedirs(metadata_dir, exist_ok=True)
-    
-    # Save datasets (no header for XGBoost)
-    train_data.to_csv(os.path.join(train_dir, 'train.csv'), index=False, header=False)
-    test_data.to_csv(os.path.join(test_dir, 'test.csv'), index=False, header=False)
-    
-    # Save preprocessing artifacts
-    with open(os.path.join(metadata_dir, 'label_encoders.pkl'), 'wb') as f:
-        pickle.dump(label_encoders, f)
-    
-    with open(os.path.join(metadata_dir, 'scaler.pkl'), 'wb') as f:
-        pickle.dump(scaler, f)
-    
-    with open(os.path.join(metadata_dir, 'target_encoder.pkl'), 'wb') as f:
-        pickle.dump(target_encoder, f)
-    
-    with open(os.path.join(metadata_dir, 'feature_names.json'), 'w') as f:
-        json.dump(list(X.columns), f)
-    
-    # Save metadata
-    metadata = {
-        'target_field': target_field,
-        'num_classes': int(len(target_encoder.classes_)),
-        'class_names': target_encoder.classes_.tolist(),
-        'feature_count': len(X.columns),
-        'train_samples': len(X_train),
-        'test_samples': len(X_test),
-        'categorical_features': categorical_cols,
-        'numerical_features': numerical_cols
+    # Output data configuration
+    output_data_config = {
+        'S3OutputPath': output_s3_path
     }
     
-    with open(os.path.join(metadata_dir, 'model_metadata.json'), 'w') as f:
-        json.dump(metadata, f)
-    
-    print(f"✅ Processed {target_field}: {len(X_train)} train, {len(X_test)} test samples")
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--input-path', type=str, default='/opt/ml/processing/input')
-    parser.add_argument('--output-path', type=str, default='/opt/ml/processing/output')
-    parser.add_argument('--target-field', type=str, required=True)
-    
-    args = parser.parse_args()
-    preprocess_data(args.input_path, args.output_path, args.target_field)
-'''
-
-# Save preprocessing script
-with open('preprocessing.py', 'w') as f:
-    f.write(preprocessing_code)
-
-print("✅ Preprocessing script created: preprocessing.py")
-
-# ============================================================================
-# CELL 5: Run Preprocessing for All Target Fields
-# ============================================================================
-
-from sagemaker.sklearn.processing import SKLearnProcessor
-
-processor = SKLearnProcessor(
-    framework_version='1.2-1',
-    role=role,
-    instance_type=PROCESSING_INSTANCE,
-    instance_count=1,
-    base_job_name='invoice-preprocessing'
-)
-
-preprocessing_jobs = {}
-
-for target_field in TARGET_FIELDS:
-    print(f"\n🔄 Starting preprocessing for: {target_field}")
-    
-    processor.run(
-        code='preprocessing.py',
-        arguments=['--target-field', target_field],
-        inputs=[
-            ProcessingInput(
-                source=f'{DATA_S3_PATH}invoices.csv',
-                destination='/opt/ml/processing/input'
-            )
-        ],
-        outputs=[
-            ProcessingOutput(
-                output_name='train',
-                source='/opt/ml/processing/output/train',
-                destination=f'{MODELS_S3_PREFIX}data/{target_field}/train'
-            ),
-            ProcessingOutput(
-                output_name='test',
-                source='/opt/ml/processing/output/test',
-                destination=f'{MODELS_S3_PREFIX}data/{target_field}/test'
-            ),
-            ProcessingOutput(
-                output_name='metadata',
-                source='/opt/ml/processing/output/metadata',
-                destination=f'{MODELS_S3_PREFIX}metadata/{target_field}'
-            )
-        ],
-        wait=True,  # Wait for each to complete
-        logs=True
-    )
-    
-    preprocessing_jobs[target_field] = processor.latest_job.name
-    print(f"✅ Completed: {target_field}")
-
-print("\n✅ All preprocessing jobs completed!")
-
-# ============================================================================
-# CELL 6: Load Metadata to Determine Model Parameters
-# ============================================================================
-
-def load_metadata(target_field):
-    """Load metadata for a target field"""
-    metadata_path = f'{MODELS_S3_PREFIX}metadata/{target_field}/model_metadata.json'
-    
-    # Download metadata
-    local_path = f'/tmp/{target_field}_metadata.json'
-    s3_client.download_file(
-        bucket,
-        metadata_path.replace(f's3://{bucket}/', ''),
-        local_path
-    )
-    
-    with open(local_path, 'r') as f:
-        metadata = json.load(f)
-    
-    return metadata
-
-# Load metadata for all fields
-metadata_dict = {}
-for target_field in TARGET_FIELDS:
-    metadata = load_metadata(target_field)
-    metadata_dict[target_field] = metadata
-    print(f"{target_field}: {metadata['num_classes']} classes - {metadata['class_names']}")
-
-print("\n✅ Metadata loaded for all fields")
-
-# ============================================================================
-# CELL 7: Train XGBoost Models
-# ============================================================================
-
-training_jobs = {}
-
-for target_field in TARGET_FIELDS:
-    print(f"\n🔄 Training model for: {target_field}")
-    
-    metadata = metadata_dict[target_field]
-    num_classes = metadata['num_classes']
-    
-    # Determine objective
-    if num_classes == 2:
-        objective = 'binary:logistic'
-        hyperparameters = {
-            'max_depth': '6',
-            'eta': '0.2',
-            'objective': objective,
-            'num_round': '100',
-            'subsample': '0.8',
-            'colsample_bytree': '0.8',
-            'eval_metric': 'auc'
+    # Job configuration
+    auto_ml_job_config = {
+        'CompletionCriteria': {
+            'MaxCandidates': MAX_CANDIDATES,
+            'MaxRuntimePerTrainingJobInSeconds': MAX_RUNTIME_PER_JOB,
+            'MaxAutoMLJobRuntimeInSeconds': MAX_RUNTIME_PER_JOB * 3
         }
-    else:
-        objective = 'multi:softmax'
-        hyperparameters = {
-            'max_depth': '6',
-            'eta': '0.2',
-            'objective': objective,
-            'num_class': str(num_classes),
-            'num_round': '100',
-            'subsample': '0.8',
-            'colsample_bytree': '0.8',
-            'eval_metric': 'merror'
-        }
-    
-    # Create XGBoost estimator
-    xgb_estimator = XGBoost(
-        entry_point='train',  # Use default training script
-        role=role,
-        instance_count=1,
-        instance_type=TRAINING_INSTANCE,
-        framework_version='1.7-1',
-        hyperparameters=hyperparameters,
-        output_path=f'{MODELS_S3_PREFIX}output/{target_field}',
-        base_job_name=f'xgb-{target_field}'
-    )
-    
-    # Train
-    xgb_estimator.fit({
-        'train': f'{MODELS_S3_PREFIX}data/{target_field}/train',
-        'validation': f'{MODELS_S3_PREFIX}data/{target_field}/test'
-    }, wait=True, logs=True)
-    
-    training_jobs[target_field] = xgb_estimator.latest_training_job.name
-    print(f"✅ Training complete: {target_field}")
-
-print("\n✅ All training jobs completed!")
-
-# ============================================================================
-# CELL 8: Create Inference Script
-# ============================================================================
-
-inference_code = '''
-import json
-import os
-import pickle
-import xgboost as xgb
-import numpy as np
-import pandas as pd
-
-def model_fn(model_dir):
-    """Load model and preprocessing artifacts"""
-    model = xgb.Booster()
-    model.load_model(os.path.join(model_dir, 'xgboost-model'))
-    
-    with open(os.path.join(model_dir, 'label_encoders.pkl'), 'rb') as f:
-        label_encoders = pickle.load(f)
-    
-    with open(os.path.join(model_dir, 'scaler.pkl'), 'rb') as f:
-        scaler = pickle.load(f)
-    
-    with open(os.path.join(model_dir, 'target_encoder.pkl'), 'rb') as f:
-        target_encoder = pickle.load(f)
-    
-    with open(os.path.join(model_dir, 'feature_names.json'), 'r') as f:
-        feature_names = json.load(f)
-    
-    with open(os.path.join(model_dir, 'model_metadata.json'), 'r') as f:
-        metadata = json.load(f)
-    
-    return {
-        'model': model,
-        'label_encoders': label_encoders,
-        'scaler': scaler,
-        'target_encoder': target_encoder,
-        'feature_names': feature_names,
-        'metadata': metadata
     }
-
-def input_fn(request_body, content_type='application/json'):
-    """Parse input data"""
-    if content_type == 'application/json':
-        data = json.loads(request_body)
-        if isinstance(data, list):
-            return pd.DataFrame(data)
-        else:
-            return pd.DataFrame([data])
-    else:
-        raise ValueError(f"Unsupported content type: {content_type}")
-
-def predict_fn(input_data, model_artifacts):
-    """Make predictions"""
-    model = model_artifacts['model']
-    label_encoders = model_artifacts['label_encoders']
-    scaler = model_artifacts['scaler']
-    target_encoder = model_artifacts['target_encoder']
-    feature_names = model_artifacts['feature_names']
-    metadata = model_artifacts['metadata']
     
-    # Preprocess input
-    X = input_data.copy()
-    
-    # Encode categorical features
-    for col, encoder in label_encoders.items():
-        if col in X.columns:
-            X[col] = X[col].astype(str)
-            # Handle unseen categories
-            X[col] = X[col].apply(
-                lambda x: x if x in encoder.classes_ else encoder.classes_[0]
-            )
-            X[col] = encoder.transform(X[col])
-    
-    # Scale numerical features
-    numerical_cols = [col for col in metadata['numerical_features'] if col in X.columns]
-    if numerical_cols:
-        X[numerical_cols] = scaler.transform(X[numerical_cols])
-    
-    # Ensure correct feature order
-    X = X[feature_names]
-    
-    # Convert to DMatrix
-    dmatrix = xgb.DMatrix(X)
-    
-    # Predict
-    predictions = model.predict(dmatrix)
-    
-    # Decode predictions
-    predicted_classes = target_encoder.inverse_transform(predictions.astype(int))
-    
-    return {
-        'predictions': predicted_classes.tolist(),
-        'raw_predictions': predictions.tolist()
+    # AutoML job objective
+    auto_ml_job_objective = {
+        'MetricName': OBJECTIVE_METRIC
     }
+    
+    # Create job parameters
+    job_params = {
+        'AutoMLJobName': job_name,
+        'InputDataConfig': input_data_config,
+        'OutputDataConfig': output_data_config,
+        'AutoMLJobConfig': auto_ml_job_config,
+        'AutoMLJobObjective': auto_ml_job_objective,
+        'RoleArn': ROLE
+    }
+    
+    # Add problem type if specified (not 'AUTO')
+    if PROBLEM_TYPE != 'AUTO':
+        job_params['ProblemType'] = PROBLEM_TYPE
+    
+    # Add training mode
+    if TRAINING_MODE in ['ENSEMBLING', 'HPO']:
+        job_params['AutoMLJobConfig']['Mode'] = TRAINING_MODE
+    
+    # Create the job
+    try:
+        response = sm_client.create_auto_ml_job(**job_params)
+        print(f"✓ Job created successfully!")
+        print(f"  Job ARN: {response['AutoMLJobArn']}")
+        return job_name
+    except Exception as e:
+        print(f"✗ Error creating job: {str(e)}")
+        raise
 
-def output_fn(prediction, accept='application/json'):
-    """Format output"""
-    if accept == 'application/json':
-        return json.dumps(prediction), accept
-    else:
-        raise ValueError(f"Unsupported accept type: {accept}")
-'''
 
-# Save inference script
-with open('inference.py', 'w') as f:
-    f.write(inference_code)
-
-print("✅ Inference script created: inference.py")
+def get_best_model_info(job_name):
+    """
+    Retrieve information about the best model from completed job
+    """
+    response = sm_client.describe_auto_ml_job(AutoMLJobName=job_name)
+    
+    if response['AutoMLJobStatus'] != 'Completed':
+        print(f"Job {job_name} is not completed yet")
+        return None
+    
+    best_candidate = response.get('BestCandidate')
+    if not best_candidate:
+        print(f"No best candidate found for job {job_name}")
+        return None
+    
+    model_info = {
+        'job_name': job_name,
+        'candidate_name': best_candidate['CandidateName'],
+        'objective_metric_name': best_candidate['FinalAutoMLJobObjectiveMetric']['MetricName'],
+        'objective_metric_value': best_candidate['FinalAutoMLJobObjectiveMetric']['Value'],
+        'inference_containers': best_candidate['InferenceContainers'],
+        'creation_time': response['CreationTime'],
+        'end_time': response.get('EndTime')
+    }
+    
+    return model_info
 
 # ============================================================================
-# CELL 9: Package Models for Multi-Model Endpoint
+# MAIN PIPELINE EXECUTION
 # ============================================================================
 
-import tarfile
-import tempfile
-
-def package_model_for_mme(target_field, training_job_name):
-    """Package model with preprocessing artifacts for MME"""
+def run_autopilot_pipeline():
+    """
+    Main function to run the complete pipeline for all target columns
+    """
+    print("\n" + "="*80)
+    print("SAGEMAKER AUTOPILOT MULTI-TARGET CLASSIFICATION PIPELINE")
+    print("="*80)
     
-    print(f"Packaging {target_field}...")
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
     
-    # Paths
-    model_s3_path = f'{MODELS_S3_PREFIX}output/{target_field}/{training_job_name}/output/model.tar.gz'
-    metadata_s3_prefix = f'{MODELS_S3_PREFIX}metadata/{target_field}/'
+    # Step 1: Load data from S3
+    print(f"\n[Step 1] Loading data from S3...")
+    input_s3_path = f"s3://{BUCKET_NAME}/{INPUT_DATA_PREFIX}/{DATASET_FILE}"
+    print(f"Reading from: {input_s3_path}")
     
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # Download model
-        model_local = os.path.join(tmpdir, 'model.tar.gz')
-        s3_client.download_file(
-            bucket,
-            model_s3_path.replace(f's3://{bucket}/', ''),
-            model_local
+    try:
+        df = pd.read_csv(input_s3_path)
+        print(f"✓ Data loaded successfully!")
+        print(f"  Shape: {df.shape}")
+        print(f"  Columns: {df.columns.tolist()}")
+    except Exception as e:
+        print(f"✗ Error loading data: {str(e)}")
+        print(f"\nMake sure your CSV file is uploaded to: {input_s3_path}")
+        return
+    
+    # Validate columns
+    missing_features = set(INPUT_FEATURES) - set(df.columns)
+    missing_targets = set(TARGET_COLS) - set(df.columns)
+    
+    if missing_features:
+        print(f"\n✗ Missing input features: {missing_features}")
+        return
+    if missing_targets:
+        print(f"\n✗ Missing target columns: {missing_targets}")
+        return
+    
+    print(f"✓ All required columns found!")
+    
+    # Step 2: Analyze and prepare datasets for each target
+    print(f"\n[Step 2] Preparing datasets for each target...")
+    
+    prepared_datasets = {}
+    for target_col in TARGET_COLS:
+        # Get column information
+        unique_values = get_column_info(df, target_col)
+        
+        # Prepare dataset
+        prep_prefix = f"{OUTPUT_PREFIX}/prepared-data/{timestamp}"
+        s3_path, row_count = prepare_dataset_for_target(
+            df, target_col, INPUT_FEATURES, prep_prefix
         )
         
-        # Extract model
-        model_dir = os.path.join(tmpdir, 'model')
-        os.makedirs(model_dir, exist_ok=True)
-        with tarfile.open(model_local, 'r:gz') as tar:
-            tar.extractall(model_dir)
-        
-        # Download preprocessing artifacts
-        artifacts = [
-            'label_encoders.pkl',
-            'scaler.pkl',
-            'target_encoder.pkl',
-            'feature_names.json',
-            'model_metadata.json'
-        ]
-        
-        for artifact in artifacts:
-            s3_key = f'{metadata_s3_prefix}{artifact}'.replace(f's3://{bucket}/', '')
-            local_path = os.path.join(model_dir, artifact)
-            s3_client.download_file(bucket, s3_key, local_path)
-        
-        # Add inference script
-        import shutil
-        shutil.copy('inference.py', os.path.join(model_dir, 'code', 'inference.py'))
-        
-        # Create new tarball
-        output_tar = os.path.join(tmpdir, f'{target_field}.tar.gz')
-        with tarfile.open(output_tar, 'w:gz') as tar:
-            tar.add(model_dir, arcname='.')
-        
-        # Upload to MME location
-        mme_key = f'{PREFIX}/mme/{target_field}.tar.gz'
-        s3_client.upload_file(output_tar, bucket, mme_key)
-        
-        print(f"✅ Packaged: s3://{bucket}/{mme_key}")
-        return f's3://{bucket}/{mme_key}'
-
-# Package all models
-mme_models = {}
-for target_field in TARGET_FIELDS:
-    model_uri = package_model_for_mme(target_field, training_jobs[target_field])
-    mme_models[target_field] = model_uri
-
-print("\n✅ All models packaged for MME")
-
-# ============================================================================
-# CELL 10: Deploy Multi-Model Endpoint
-# ============================================================================
-
-from sagemaker.multidatamodel import MultiDataModel
-
-endpoint_name = f'invoice-classifier-mme-{datetime.now().strftime("%Y%m%d-%H%M%S")}'
-
-# Create MultiDataModel
-mme = MultiDataModel(
-    name=endpoint_name,
-    model_data_prefix=MME_MODEL_PATH,
-    image_uri=sagemaker.image_uris.retrieve(
-        framework='xgboost',
-        region=region,
-        version='1.7-1',
-        image_scope='inference'
-    ),
-    role=role,
-    sagemaker_session=sess
-)
-
-print(f"Deploying Multi-Model Endpoint: {endpoint_name}")
-print("This will take 5-10 minutes...")
-
-# Deploy
-predictor = mme.deploy(
-    initial_instance_count=1,
-    instance_type=INFERENCE_INSTANCE,
-    endpoint_name=endpoint_name
-)
-
-print(f"\n✅ Multi-Model Endpoint deployed: {endpoint_name}")
-
-# ============================================================================
-# CELL 11: Test Inference
-# ============================================================================
-
-runtime_client = boto3.client('sagemaker-runtime', region_name=region)
-
-def predict_field(invoice_data, target_field, endpoint_name):
-    """Make prediction for specific field"""
+        prepared_datasets[target_col] = {
+            's3_path': s3_path,
+            'row_count': row_count,
+            'unique_values': unique_values
+        }
     
-    payload = json.dumps(invoice_data)
+    # Step 3: Launch Autopilot jobs for each target
+    print(f"\n[Step 3] Launching Autopilot jobs...")
     
-    response = runtime_client.invoke_endpoint(
-        EndpointName=endpoint_name,
-        ContentType='application/json',
-        Accept='application/json',
-        TargetModel=f'{target_field}.tar.gz',
-        Body=payload
-    )
-    
-    result = json.loads(response['Body'].read().decode())
-    return result
-
-# Test with sample invoice
-test_invoice = {
-    'amount': 2500.00,
-    'vendor_name': 'TechCorp',
-    'department': 'IT',
-    'line_items_count': 5,
-    'tax_amount': 200.00,
-    'days_outstanding': 15
-}
-
-print("Testing predictions...\n")
-
-# Predict each field
-for target_field in TARGET_FIELDS:
-    result = predict_field(test_invoice, target_field, endpoint_name)
-    print(f"{target_field}: {result['predictions'][0]}")
-
-print("\n✅ Inference test complete!")
-
-# ============================================================================
-# CELL 12: Batch Predictions
-# ============================================================================
-
-def predict_all_fields(invoice_data, target_fields, endpoint_name):
-    """Predict all classification fields for an invoice"""
-    results = {}
-    
-    for field in target_fields:
+    job_info = {}
+    for target_col in TARGET_COLS:
+        job_name = f"autopilot-{target_col.lower()}-{timestamp}"
+        output_s3_path = f"s3://{BUCKET_NAME}/{OUTPUT_PREFIX}/jobs/{job_name}"
+        
         try:
-            prediction = predict_field(invoice_data, field, endpoint_name)
-            results[field] = prediction['predictions'][0]
+            create_autopilot_job(
+                target_col=target_col,
+                input_s3_path=prepared_datasets[target_col]['s3_path'],
+                output_s3_path=output_s3_path,
+                job_name=job_name
+            )
+            
+            job_info[target_col] = {
+                'job_name': job_name,
+                'output_path': output_s3_path,
+                'status': 'InProgress'
+            }
+            
+            # Small delay between job submissions
+            time.sleep(2)
+            
         except Exception as e:
-            results[field] = f"Error: {str(e)}"
+            print(f"Failed to create job for {target_col}: {str(e)}")
+            job_info[target_col] = {
+                'job_name': None,
+                'status': 'Failed',
+                'error': str(e)
+            }
+    
+    # Step 4: Monitor all jobs
+    print(f"\n[Step 4] Monitoring Autopilot jobs...")
+    print(f"Launched {len([j for j in job_info.values() if j.get('job_name')])} jobs")
+    print(f"\nNote: Jobs will run in parallel. This may take 1-3 hours depending on data size.")
+    print(f"You can close this notebook - jobs will continue running.")
+    
+    results = {}
+    for target_col, info in job_info.items():
+        if info.get('job_name'):
+            try:
+                response = wait_for_autopilot_job(info['job_name'])
+                results[target_col] = {
+                    'job_name': info['job_name'],
+                    'status': response['AutoMLJobStatus'],
+                    'model_info': get_best_model_info(info['job_name'])
+                }
+            except Exception as e:
+                print(f"Error monitoring {target_col}: {str(e)}")
+                results[target_col] = {
+                    'job_name': info['job_name'],
+                    'status': 'Error',
+                    'error': str(e)
+                }
+    
+    # Step 5: Summary
+    print(f"\n{'='*80}")
+    print("PIPELINE EXECUTION SUMMARY")
+    print(f"{'='*80}\n")
+    
+    for target_col, result in results.items():
+        print(f"Target: {target_col}")
+        print(f"  Job Name: {result['job_name']}")
+        print(f"  Status: {result['status']}")
+        
+        if result.get('model_info'):
+            info = result['model_info']
+            print(f"  Best {info['objective_metric_name']}: {info['objective_metric_value']:.4f}")
+            print(f"  Best Candidate: {info['candidate_name']}")
+        print()
+    
+    # Save results to JSON
+    results_file = f"autopilot_results_{timestamp}.json"
+    with open(results_file, 'w') as f:
+        json.dump(results, f, indent=2, default=str)
+    
+    print(f"Results saved to: {results_file}")
+    
+    # Upload results to S3
+    results_s3_path = f"{OUTPUT_PREFIX}/results/{results_file}"
+    s3_client.upload_file(results_file, BUCKET_NAME, results_s3_path)
+    print(f"Results uploaded to: s3://{BUCKET_NAME}/{results_s3_path}")
     
     return results
 
-# Test batch prediction
-batch_results = predict_all_fields(test_invoice, TARGET_FIELDS, endpoint_name)
-
-print("Complete Invoice Classification:")
-print(json.dumps(batch_results, indent=2))
 
 # ============================================================================
-# CELL 13: Cleanup (Optional - Run when done)
+# EXECUTE PIPELINE
 # ============================================================================
 
-# Uncomment to delete endpoint
-# predictor.delete_endpoint()
-# print("✅ Endpoint deleted")
-
-print("\n" + "="*60)
-print("🎉 PIPELINE COMPLETE!")
-print("="*60)
-print(f"\nEndpoint Name: {endpoint_name}")
-print(f"Models trained: {len(TARGET_FIELDS)}")
-print(f"MME Model Path: {MME_MODEL_PATH}")
-print("\nTo make predictions, use:")
-print(f"  predict_field(invoice_data, 'target_field', '{endpoint_name}')")
+if __name__ == "__main__":
+    # Run the complete pipeline
+    results = run_autopilot_pipeline()
+    
+    print("\n" + "="*80)
+    print("Pipeline execution completed!")
+    print("="*80)
+    print("\nNext steps:")
+    print("1. Review model performance for each target in SageMaker Studio")
+    print("2. Deploy the best models to endpoints for inference")
+    print("3. Use batch transform for bulk predictions")
+    print("\nYou can find all artifacts in S3:")
+    print(f"  s3://{BUCKET_NAME}/{OUTPUT_PREFIX}/")

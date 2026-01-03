@@ -1,153 +1,99 @@
-# Create source code directory and subdirectories
-source_dir = 'source_code'
-code_dir = os.path.join(source_dir, 'code')
-os.makedirs(code_dir, exist_ok=True)
-
-# ----------------------------------------------------
-# 2a. requirements.txt
-# ----------------------------------------------------
-requirements_content = """
-sagemaker-inference
-xgboost
-scikit-learn
-pandas
-boto3
-"""
-with open(os.path.join(source_dir, 'requirements.txt'), 'w') as f:
-    f.write(requirements_content.strip())
-print("Created source_code/requirements.txt")
-
-# ----------------------------------------------------
-# 2b. inference.py (MME Handler with LabelEncoder)
-# ----------------------------------------------------
-inference_content = """
-import joblib
-import os
-import json
-import pandas as pd
-from io import StringIO
-
-def model_fn(model_dir):
-    \"\"\"
-    Loads the model and the encoder from the model_dir.
-    MME calls this when a specific model is loaded.
-    \"\"\"
-    model = joblib.load(os.path.join(model_dir, "model.joblib"))
-    encoder = joblib.load(os.path.join(model_dir, "encoder.joblib"))
-    return {"model": model, "encoder": encoder}
-
-def transform_fn(model_dict, data, content_type, accept_type):
-    \"\"\"
-    Handles input, prediction, and output (critical for decoding labels).
-    \"\"\"
-    # 1. Input Parsing
-    if content_type == "text/csv":
-        input_data = pd.read_csv(StringIO(data), header=None)
-    elif content_type == "application/json":
-        input_data = pd.DataFrame(json.loads(data))
-    else:
-        raise ValueError(f"Unsupported content type: {content_type}")
-
-    # 2. Predict
-    model = model_dict["model"]
-    encoder = model_dict["encoder"]
-    
-    predicted_indices = model.predict(input_data)
-    decoded_predictions = encoder.inverse_transform(predicted_indices)
-
-    # 3. Output Formatting
-    if accept_type == "application/json":
-        return json.dumps(decoded_predictions.tolist()), "application/json"
-    else:
-        # For simplicity, returning CSV/text is omitted, stick to JSON
-        raise ValueError(f"Unsupported accept type: {accept_type}")
-"""
-with open(os.path.join(code_dir, 'inference.py'), 'w') as f:
-    f.write(inference_content.strip())
-print("Created source_code/code/inference.py")
-
-# ----------------------------------------------------
-# 2c. train.py (Parameterized Training and Upload)
-# ----------------------------------------------------
-train_content = f"""
-import argparse
-import os
-import pandas as pd
-import joblib
-import tarfile
-import boto3
 import sagemaker
+import boto3
+from sagemaker.workflow.pipeline import Pipeline
+from sagemaker.workflow.steps import ProcessingStep
+from sagemaker.workflow.automl_step import AutoMLStep
+from sagemaker.sklearn.processing import SKLearnProcessor
+from sagemaker.processing import ProcessingInput, ProcessingOutput
+from sagemaker.automl.automl import AutoML
+from sagemaker.workflow.pipeline_context import PipelineSession
 
-from sklearn.preprocessing import LabelEncoder
-from xgboost import XGBClassifier
+# --- CONFIGURATION ---
+TARGET_COLS = ["DepartmentCode", "AccountCode", "SubAccountCode", "LocationCode"]
+INPUT_FEATURES = ["VendorName", "LineDescription", "ClubNumber"]
 
-TRAIN_DATA_PATH = os.environ.get("SM_CHANNEL_TRAIN", "/opt/ml/input/data/train")
-MODEL_DIR = os.environ.get("SM_MODEL_DIR", "/opt/ml/model")
+# S3 Location of your existing master 2M record CSV
+INPUT_DATA_URI = "s3://your-bucket-name/path/to/master_dataset.csv" 
+BUCKET = sagemaker.Session().default_bucket()
+ROLE = sagemaker.get_execution_role()
+PREFIX = "sagemaker/automl-dynamic-pipeline"
 
-def train(args):
-    print(f"--- Training model for target field: {{args.target_field}} ---")
-    
-    # 1. Load data (Assuming one preprocessed CSV file)
-    data_file = os.path.join(TRAIN_DATA_PATH, "invoices_preprocessed.csv")
-    df = pd.read_csv(data_file)
-    
-    # 2. Prepare data
-    input_features_list = args.input_features.split(',')
-    X = df[input_features_list]
-    y_raw = df[args.target_field]
+# Session setup
+pipeline_session = PipelineSession()
 
-    # 3. Encode Target
-    encoder = LabelEncoder()
-    y = encoder.fit_transform(y_raw)
-    
-    # 4. Train XGBoost Model
-    num_classes = len(encoder.classes_)
-    model = XGBClassifier(
-        objective='multi:softmax',
-        num_class=num_classes,
-        use_label_encoder=False,
-        eval_metric='mlogloss',
-        n_estimators=100
+# --- STEP 1: PROCESSING (Splits data to prevent leakage) ---
+processor = SKLearnProcessor(
+    framework_version="1.0-1",
+    instance_type="ml.m5.2xlarge", # 2xlarge to handle 2M rows comfortably
+    instance_count=1,
+    base_job_name="automl-splitter",
+    role=ROLE,
+    sagemaker_session=pipeline_session
+)
+
+# Dynamically generate outputs: One S3 folder per target
+processing_outputs = []
+for target in TARGET_COLS:
+    processing_outputs.append(
+        ProcessingOutput(
+            output_name=target, 
+            source=f"/opt/ml/processing/output/{target}",
+            destination=f"s3://{BUCKET}/{PREFIX}/data/{target}"
+        )
     )
-    model.fit(X, y)
 
-    # 5. Save model and encoder LOCALLY
-    joblib.dump(model, os.path.join(MODEL_DIR, "model.joblib"))
-    joblib.dump(encoder, os.path.join(MODEL_DIR, "encoder.joblib"))
-    
-    # 6. Package model.tar.gz with unique name (includes inference.py)
-    model_name = f"model-{{args.target_field.replace('_', '-')}}.tar.gz"
-    local_tar_path = os.path.join(MODEL_DIR, model_name)
-    
-    with tarfile.open(local_tar_path, "w:gz") as tar:
-        tar.add(os.path.join(MODEL_DIR, "model.joblib"), arcname="model.joblib")
-        tar.add(os.path.join(MODEL_DIR, "encoder.joblib"), arcname="encoder.joblib")
-        # CRITICAL: The inference script must be included in the code/ path
-        tar.add(os.path.join("code", "inference.py"), arcname="code/inference.py") 
+step_process = ProcessingStep(
+    name="SplitDataForTargets",
+    processor=processor,
+    inputs=[
+        ProcessingInput(source=INPUT_DATA_URI, destination="/opt/ml/processing/input", input_name="input_data")
+    ],
+    outputs=processing_outputs,
+    code="preprocess.py", # The script we wrote above
+    job_arguments=[
+        "--targets", ",".join(TARGET_COLS),
+        "--features", ",".join(INPUT_FEATURES)
+    ]
+)
 
-    # 7. Upload to final MME S3 Prefix
-    s3_client = boto3.client("s3")
-    s3_bucket, s3_prefix = sagemaker.utils.parse_s3_url(args.mme_s3_prefix)
-    
-    s3_client.upload_file(
-        local_tar_path,
-        s3_bucket,
-        os.path.join(s3_prefix, model_name)
+# --- STEP 2: AUTOML STEPS (Dynamic Loop) ---
+automl_steps = []
+
+for target in TARGET_COLS:
+    # 1. Define the AutoML configuration for this specific target
+    automl = AutoML(
+        role=ROLE,
+        target_attribute_name=target,
+        output_path=f"s3://{BUCKET}/{PREFIX}/output/{target}",
+        max_candidates=10,             # Keep it low for testing, increase for production
+        total_job_runtime_in_seconds=3600, # 1 hour max per job
+        mode="ENSEMBLING",             # Ensembling is usually faster/cheaper for large tabular data
+        sagemaker_session=pipeline_session
     )
-    print("--- Training complete and model uploaded ---")
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
     
-    parser.add_argument("--target-field", type=str, required=True)
-    parser.add_argument("--mme-s3-prefix", type=str, required=True)
-    parser.add_argument("--all-targets", type=str, required=True)
-    parser.add_argument("--input-features", type=str, required=True)
+    # 2. Define the inputs (The specific output from the processing step)
+    # We map the Processing Step's output directly to this AutoML step's input
+    input_data = step_process.properties.ProcessingOutputConfig.Outputs[target].S3Output.S3Uri
     
-    args = parser.parse_args()
-    train(args)
-"""
-with open(os.path.join(source_dir, 'train.py'), 'w') as f:
-    f.write(train_content.strip())
-print("Created source_code/train.py")
+    # 3. Create the Pipeline Step
+    step_automl = AutoMLStep(
+        name=f"Train-{target}",
+        automl=automl,
+        inputs=input_data
+    )
+    
+    automl_steps.append(step_automl)
+
+# --- STEP 3: BUILD AND RUN PIPELINE ---
+pipeline = Pipeline(
+    name="Dynamic-MultiTarget-AutoML",
+    steps=[step_process] + automl_steps, # Run Process first, then all AutoMLs run in parallel
+    sagemaker_session=pipeline_session
+)
+
+# Create/Update the pipeline
+pipeline.upsert(role_arn=ROLE)
+
+# Execute
+execution = pipeline.start()
+print(f"Pipeline started! Execution ARN: {execution.arn}")
