@@ -1,0 +1,479 @@
+"""
+Single SageMaker Pipeline with Parallel AutoML Training for Multiple Targets
+All 4 targets train simultaneously in one pipeline DAG with full visibility
+"""
+
+import boto3
+import sagemaker
+from sagemaker import AutoML, AutoMLInput, get_execution_role
+from sagemaker.workflow.pipeline import Pipeline
+from sagemaker.workflow.parameters import ParameterString, ParameterInteger
+from sagemaker.workflow.automl_step import AutoMLStep
+from sagemaker.workflow.model_step import ModelStep
+from sagemaker.workflow.pipeline_context import PipelineSession
+from sagemaker.workflow.functions import Join
+from sagemaker.sklearn.processing import SKLearnProcessor
+from sagemaker.processing import ProcessingInput, ProcessingOutput
+from sagemaker.workflow.steps import ProcessingStep
+from sagemaker.workflow.parallelism_config import ParallelismConfiguration
+from datetime import datetime
+import json
+
+# ============================================================================
+# CONFIGURATION - Modify these parameters
+# ============================================================================
+
+# Define your target columns and input features - EASILY MODIFIABLE
+TARGET_COLS = ["DepartmentCode", "AccountCode", "SubAccountCode", "LocationCode"]
+INPUT_FEATURES = ["VendorName", "LineDescription", "ClubNumber"]
+
+# S3 paths
+BUCKET_NAME = "your-bucket-name"  # Replace with your S3 bucket
+INPUT_DATA_PREFIX = "input-data"  # S3 prefix where your CSV is stored
+OUTPUT_PREFIX = "automl-unified-pipeline"  # S3 prefix for pipeline outputs
+
+# Dataset file name
+DATASET_FILE = "your_dataset.csv"  # Replace with your CSV file name
+
+# AutoML Configuration
+MAX_CANDIDATES = 50
+MAX_RUNTIME_PER_JOB = 3600  # 1 hour
+OBJECTIVE_METRIC = "Accuracy"
+
+# Pipeline Name
+PIPELINE_NAME = "multi-target-automl-pipeline"
+
+# IAM Role
+ROLE = get_execution_role()
+
+# ============================================================================
+# INITIALIZE SESSIONS
+# ============================================================================
+
+sm_client = boto3.client('sagemaker')
+sagemaker_session = sagemaker.Session()
+pipeline_session = PipelineSession()
+
+print(f"Using SageMaker role: {ROLE}")
+print(f"Region: {sagemaker_session.boto_region_name}")
+
+# ============================================================================
+# PROCESSING SCRIPT FOR DATA PREPARATION
+# ============================================================================
+
+PREP_SCRIPT = """
+import pandas as pd
+import argparse
+import os
+import json
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--target-col", type=str, required=True)
+    parser.add_argument("--input-features", type=str, required=True)
+    args = parser.parse_args()
+    
+    # Parse input features from JSON string
+    input_features = json.loads(args.input_features)
+    target_col = args.target_col
+    
+    # Read input data
+    input_path = "/opt/ml/processing/input/data.csv"
+    df = pd.read_csv(input_path)
+    
+    print(f"Processing target: {target_col}")
+    print(f"Input shape: {df.shape}")
+    
+    # Select only required columns
+    columns_to_keep = input_features + [target_col]
+    df_target = df[columns_to_keep].copy()
+    
+    # Remove rows with missing target values
+    df_target = df_target.dropna(subset=[target_col])
+    
+    print(f"Output shape: {df_target.shape}")
+    print(f"Unique target values: {df_target[target_col].nunique()}")
+    
+    # Save prepared data
+    output_path = "/opt/ml/processing/output/train.csv"
+    df_target.to_csv(output_path, index=False, header=True)
+    
+    # Save metadata
+    metadata = {
+        "target_column": target_col,
+        "num_rows": len(df_target),
+        "num_features": len(input_features),
+        "unique_classes": int(df_target[target_col].nunique())
+    }
+    
+    metadata_path = "/opt/ml/processing/output/metadata.json"
+    with open(metadata_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+    
+    print("Data preparation completed successfully!")
+"""
+
+# Save the preprocessing script locally
+with open("prepare_data.py", "w") as f:
+    f.write(PREP_SCRIPT)
+
+print("✓ Data preparation script created")
+
+# ============================================================================
+# BUILD UNIFIED PIPELINE
+# ============================================================================
+
+def create_unified_pipeline():
+    """
+    Create a SINGLE pipeline with parallel branches for each target
+    
+    Pipeline Structure:
+    
+                        Input Data
+                             |
+            +----------------+----------------+----------------+
+            |                |                |                |
+        Prep-Dept       Prep-Acct      Prep-SubAcct     Prep-Loc
+            |                |                |                |
+        AutoML-Dept     AutoML-Acct    AutoML-SubAcct   AutoML-Loc
+            |                |                |                |
+        Register-Dept   Register-Acct  Register-SubAcct Register-Loc
+    
+    All branches execute in parallel automatically!
+    """
+    
+    print("\n" + "="*80)
+    print("CREATING UNIFIED SAGEMAKER PIPELINE")
+    print("="*80)
+    print(f"\nPipeline will train {len(TARGET_COLS)} models in parallel:")
+    for i, target in enumerate(TARGET_COLS, 1):
+        print(f"  {i}. {target}")
+    
+    timestamp = datetime.now().strftime('%Y%m%d')
+    
+    # ========================================================================
+    # PIPELINE PARAMETERS
+    # ========================================================================
+    
+    input_data = ParameterString(
+        name="InputData",
+        default_value=f"s3://{BUCKET_NAME}/{INPUT_DATA_PREFIX}/{DATASET_FILE}"
+    )
+    
+    max_candidates = ParameterInteger(
+        name="MaxCandidates",
+        default_value=MAX_CANDIDATES
+    )
+    
+    max_runtime = ParameterInteger(
+        name="MaxRuntime",
+        default_value=MAX_RUNTIME_PER_JOB
+    )
+    
+    # ========================================================================
+    # CREATE PARALLEL STEPS FOR EACH TARGET
+    # ========================================================================
+    
+    all_steps = []
+    
+    for idx, target_col in enumerate(TARGET_COLS):
+        
+        print(f"\n[{idx+1}/{len(TARGET_COLS)}] Creating steps for: {target_col}")
+        
+        # Shortened names for step identifiers (max 32 chars)
+        target_short = target_col[:8].replace('_', '').lower()
+        
+        # --------------------------------------------------------------------
+        # STEP 1: DATA PREPARATION (per target)
+        # --------------------------------------------------------------------
+        
+        sklearn_processor = SKLearnProcessor(
+            framework_version="1.2-1",
+            role=ROLE,
+            instance_type="ml.m5.xlarge",
+            instance_count=1,
+            base_job_name=f"prep-{target_short}",
+            sagemaker_session=pipeline_session
+        )
+        
+        step_prep = ProcessingStep(
+            name=f"Prep{target_short.capitalize()}",
+            processor=sklearn_processor,
+            code="prepare_data.py",
+            job_arguments=[
+                "--target-col", target_col,
+                "--input-features", json.dumps(INPUT_FEATURES)
+            ],
+            inputs=[
+                ProcessingInput(
+                    source=input_data,
+                    destination="/opt/ml/processing/input",
+                    input_name="input-data"
+                )
+            ],
+            outputs=[
+                ProcessingOutput(
+                    output_name="train",
+                    source="/opt/ml/processing/output/train.csv",
+                    destination=Join(
+                        on="/",
+                        values=[
+                            f"s3://{BUCKET_NAME}",
+                            OUTPUT_PREFIX,
+                            "prepared-data",
+                            target_col,
+                            timestamp
+                        ]
+                    )
+                ),
+                ProcessingOutput(
+                    output_name="metadata",
+                    source="/opt/ml/processing/output/metadata.json",
+                    destination=Join(
+                        on="/",
+                        values=[
+                            f"s3://{BUCKET_NAME}",
+                            OUTPUT_PREFIX,
+                            "metadata",
+                            target_col,
+                            timestamp
+                        ]
+                    )
+                )
+            ]
+        )
+        
+        # --------------------------------------------------------------------
+        # STEP 2: AUTOPILOT AUTOML TRAINING (per target)
+        # --------------------------------------------------------------------
+        
+        auto_ml = AutoML(
+            role=ROLE,
+            target_attribute_name=target_col,
+            mode="ENSEMBLING",
+            max_candidates=max_candidates,
+            max_runtime_per_training_job_in_seconds=max_runtime,
+            total_job_runtime_in_seconds=max_runtime * 3,
+            problem_type="MulticlassClassification",
+            job_objective={"MetricName": OBJECTIVE_METRIC},
+            base_job_name=f"aml-{target_short}",
+            sagemaker_session=pipeline_session,
+            output_path=f"s3://{BUCKET_NAME}/{OUTPUT_PREFIX}/automl/{target_col}"
+        )
+        
+        automl_input = AutoMLInput(
+            inputs=step_prep.properties.ProcessingOutputConfig.Outputs["train"].S3Output.S3Uri,
+            target_attribute_name=target_col,
+            channel_type="training"
+        )
+        
+        step_args = auto_ml.fit(inputs=[automl_input])
+        
+        step_automl = AutoMLStep(
+            name=f"Train{target_short.capitalize()}",
+            step_args=step_args
+        )
+        
+        # --------------------------------------------------------------------
+        # STEP 3: REGISTER MODEL (per target)
+        # --------------------------------------------------------------------
+        
+        best_model = step_automl.get_best_auto_ml_model(
+            role=ROLE,
+            sagemaker_session=pipeline_session
+        )
+        
+        step_args_register = best_model.register(
+            content_types=["text/csv"],
+            response_types=["text/csv"],
+            inference_instances=["ml.m5.large", "ml.m5.xlarge"],
+            transform_instances=["ml.m5.large"],
+            model_package_group_name=f"automl-{target_short}-models",
+            approval_status="PendingManualApproval",
+            description=f"AutoML model for predicting {target_col}"
+        )
+        
+        step_register = ModelStep(
+            name=f"Register{target_short.capitalize()}",
+            step_args=step_args_register
+        )
+        
+        # Add all steps for this target to the pipeline
+        all_steps.extend([step_prep, step_automl, step_register])
+        
+        print(f"  ✓ Created 3 steps: Prep → Train → Register")
+    
+    # ========================================================================
+    # CREATE SINGLE UNIFIED PIPELINE
+    # ========================================================================
+    
+    print(f"\n{'='*80}")
+    print(f"Building pipeline with {len(all_steps)} total steps")
+    print(f"  - {len(TARGET_COLS)} preparation steps (run in parallel)")
+    print(f"  - {len(TARGET_COLS)} training steps (run in parallel)")
+    print(f"  - {len(TARGET_COLS)} registration steps (run in parallel)")
+    print(f"{'='*80}")
+    
+    pipeline = Pipeline(
+        name=PIPELINE_NAME,
+        parameters=[
+            input_data,
+            max_candidates,
+            max_runtime
+        ],
+        steps=all_steps,
+        sagemaker_session=pipeline_session
+    )
+    
+    return pipeline
+
+
+def execute_pipeline(pipeline):
+    """
+    Create/update and execute the pipeline
+    """
+    print("\n" + "="*80)
+    print("DEPLOYING PIPELINE")
+    print("="*80)
+    
+    try:
+        # Upsert (create or update) pipeline
+        pipeline.upsert(role_arn=ROLE)
+        print(f"✓ Pipeline '{PIPELINE_NAME}' created/updated successfully")
+        
+        # Start execution
+        print("\nStarting pipeline execution...")
+        execution = pipeline.start(
+            parallelism_config=ParallelismConfiguration(
+                max_parallel_execution_steps=10  # Allow up to 10 steps to run in parallel
+            )
+        )
+        
+        print(f"✓ Pipeline execution started!")
+        print(f"\nExecution ARN: {execution.arn}")
+        
+        return execution
+        
+    except Exception as e:
+        print(f"✗ Error: {str(e)}")
+        raise
+
+
+def display_pipeline_info(execution):
+    """
+    Display helpful information about the pipeline execution
+    """
+    print("\n" + "="*80)
+    print("PIPELINE EXECUTION DETAILS")
+    print("="*80)
+    
+    region = sagemaker_session.boto_region_name
+    
+    # Pipeline URL
+    pipeline_url = f"https://console.aws.amazon.com/sagemaker/home?region={region}#/pipelines/{PIPELINE_NAME}"
+    print(f"\nPipeline Dashboard:")
+    print(f"  {pipeline_url}")
+    
+    # Execution URL
+    execution_id = execution.arn.split('/')[-1]
+    execution_url = f"https://console.aws.amazon.com/sagemaker/home?region={region}#/pipelines/{PIPELINE_NAME}/executions/{execution_id}"
+    print(f"\nExecution Details:")
+    print(f"  {execution_url}")
+    
+    print("\n" + "="*80)
+    print("MONITORING YOUR PIPELINE")
+    print("="*80)
+    
+    print("\nIn SageMaker Studio:")
+    print("  1. Navigate to 'Pipelines' in the left sidebar")
+    print(f"  2. Click on '{PIPELINE_NAME}'")
+    print("  3. View the DAG with all parallel branches")
+    print("  4. Click on execution to see real-time progress")
+    print("  5. Each step shows logs and outputs")
+    
+    print("\nParallel Execution:")
+    print(f"  • All {len(TARGET_COLS)} prep steps run simultaneously")
+    print(f"  • All {len(TARGET_COLS)} AutoML training jobs run simultaneously")
+    print(f"  • All {len(TARGET_COLS)} model registrations run simultaneously")
+    
+    print("\nExpected Timeline:")
+    print("  • Data Preparation: ~5-10 minutes (parallel)")
+    print("  • AutoML Training: ~1-3 hours (parallel, depends on data size)")
+    print("  • Model Registration: ~2-5 minutes (parallel)")
+    print(f"  • Total: ~{MAX_RUNTIME_PER_JOB//3600 + 0.5} hours (with parallelism)")
+    
+    print("\n" + "="*80)
+    print("NEXT STEPS")
+    print("="*80)
+    
+    print("\n1. Monitor Progress:")
+    print("   - Watch the pipeline DAG update in real-time")
+    print("   - View CloudWatch logs for each step")
+    print("   - Check model metrics as training completes")
+    
+    print("\n2. After Completion:")
+    print("   - Review model performance in Model Registry")
+    print("   - Approve best models for deployment")
+    print("   - Deploy to endpoints or use batch transform")
+    
+    print("\n3. Retrieve Results:")
+    print(f"   All outputs stored in: s3://{BUCKET_NAME}/{OUTPUT_PREFIX}/")
+    
+    # Save execution info
+    execution_info = {
+        "pipeline_name": PIPELINE_NAME,
+        "execution_arn": execution.arn,
+        "execution_id": execution_id,
+        "region": region,
+        "targets": TARGET_COLS,
+        "input_features": INPUT_FEATURES,
+        "timestamp": datetime.now().isoformat(),
+        "urls": {
+            "pipeline": pipeline_url,
+            "execution": execution_url
+        }
+    }
+    
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    info_file = f"pipeline_execution_{timestamp}.json"
+    
+    with open(info_file, 'w') as f:
+        json.dump(execution_info, f, indent=2)
+    
+    print(f"\n✓ Execution info saved to: {info_file}")
+
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+if __name__ == "__main__":
+    
+    print("\n" + "="*80)
+    print("SAGEMAKER UNIFIED PIPELINE - MULTI-TARGET AUTOML")
+    print("="*80)
+    print(f"\nConfiguration:")
+    print(f"  Pipeline Name: {PIPELINE_NAME}")
+    print(f"  Target Columns: {TARGET_COLS}")
+    print(f"  Input Features: {INPUT_FEATURES}")
+    print(f"  S3 Bucket: {BUCKET_NAME}")
+    print(f"  Dataset: {DATASET_FILE}")
+    print(f"  Max Candidates per Target: {MAX_CANDIDATES}")
+    print(f"  Max Runtime per Job: {MAX_RUNTIME_PER_JOB}s ({MAX_RUNTIME_PER_JOB//3600}h)")
+    
+    # Create the unified pipeline
+    pipeline = create_unified_pipeline()
+    
+    # Deploy and execute
+    execution = execute_pipeline(pipeline)
+    
+    # Display helpful information
+    display_pipeline_info(execution)
+    
+    print("\n" + "="*80)
+    print("✓ PIPELINE LAUNCHED SUCCESSFULLY")
+    print("="*80)
+    print("\nYou can now:")
+    print("  • Close this notebook (pipeline will continue running)")
+    print("  • Monitor progress in SageMaker Studio")
+    print("  • Come back later to check results")
