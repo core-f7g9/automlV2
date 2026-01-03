@@ -56,12 +56,11 @@ step_process = ProcessingStep(
     ]
 )
 
-# --- STEP 2: AUTOML STEPS (Corrected for Modern SDK) ---
+# --- STEP 2: AUTOML STEPS (Fixed for Pipeline Variables) ---
 automl_steps = []
 
 for target in TARGET_COLS:
-    # 1. Define the AutoML configuration
-    # Note: We must explicitly set auto_generate_endpoint_name=False or handle naming to avoid conflicts in loops
+    # 1. Define AutoML Config
     automl = AutoML(
         role=ROLE,
         target_attribute_name=target,
@@ -72,37 +71,35 @@ for target in TARGET_COLS:
         sagemaker_session=pipeline_session
     )
     
-    # 2. Define the input source from the previous Processing Step
-    input_data_uri = step_process.properties.ProcessingOutputConfig.Outputs[target].S3Output.S3Uri
+    # 2. Capture the Pipeline Variable (The connection to the previous step)
+    input_data_node = step_process.properties.ProcessingOutputConfig.Outputs[target].S3Output.S3Uri
     
-    # 3. Generate the step arguments by calling .fit()
-    # IMPORTANT: We do not actually run training here. Because we use 'pipeline_session',
-    # this call merely records the arguments needed for the step.
+    # 3. Generate args with a DUMMY input
+    # We pass None or a dummy list here to bypass the Python-side validation in .fit()
+    # The real input will be injected in the next step.
     automl_args = automl.fit(
-        inputs=input_data_uri,
+        inputs=None, 
         wait=False, 
         logs=False
     )
     
-    # 4. Create the AutoMLStep using 'step_args'
+    # 4. Create the Step with the REAL input
+    # 'inputs' here overrides whatever was in .fit() and handles the Pipeline Variable correctly
     step_automl = AutoMLStep(
         name=f"Train-{target}",
-        step_args=automl_args
+        step_args=automl_args,
+        inputs=[input_data_node] 
     )
     
     automl_steps.append(step_automl)
 
-# --- STEP 3: BUILD AND RUN PIPELINE ---
+# --- STEP 3: BUILD AND RUN ---
 pipeline = Pipeline(
     name="Dynamic-MultiTarget-AutoML",
-    # We flatten the list so it is [ProcessingStep, AutoMLStep1, AutoMLStep2, ...]
     steps=[step_process] + automl_steps, 
     sagemaker_session=pipeline_session
 )
 
-# Create/Update the pipeline
 pipeline.upsert(role_arn=ROLE)
-
-# Execute
 execution = pipeline.start()
 print(f"Pipeline started! Execution ARN: {execution.arn}")
