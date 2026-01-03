@@ -56,30 +56,38 @@ step_process = ProcessingStep(
     ]
 )
 
-# --- STEP 2: AUTOML STEPS (Dynamic Loop) ---
+# --- STEP 2: AUTOML STEPS (Corrected for Modern SDK) ---
 automl_steps = []
 
 for target in TARGET_COLS:
-    # 1. Define the AutoML configuration for this specific target
+    # 1. Define the AutoML configuration
+    # Note: We must explicitly set auto_generate_endpoint_name=False or handle naming to avoid conflicts in loops
     automl = AutoML(
         role=ROLE,
         target_attribute_name=target,
         output_path=f"s3://{BUCKET}/{PREFIX}/output/{target}",
-        max_candidates=10,             # Keep it low for testing, increase for production
-        total_job_runtime_in_seconds=3600, # 1 hour max per job
-        mode="ENSEMBLING",             # Ensembling is usually faster/cheaper for large tabular data
+        max_candidates=10,
+        total_job_runtime_in_seconds=3600,
+        mode="ENSEMBLING",
         sagemaker_session=pipeline_session
     )
     
-    # 2. Define the inputs (The specific output from the processing step)
-    # We map the Processing Step's output directly to this AutoML step's input
-    input_data = step_process.properties.ProcessingOutputConfig.Outputs[target].S3Output.S3Uri
+    # 2. Define the input source from the previous Processing Step
+    input_data_uri = step_process.properties.ProcessingOutputConfig.Outputs[target].S3Output.S3Uri
     
-    # 3. Create the Pipeline Step
+    # 3. Generate the step arguments by calling .fit()
+    # IMPORTANT: We do not actually run training here. Because we use 'pipeline_session',
+    # this call merely records the arguments needed for the step.
+    automl_args = automl.fit(
+        inputs=input_data_uri,
+        wait=False, 
+        logs=False
+    )
+    
+    # 4. Create the AutoMLStep using 'step_args'
     step_automl = AutoMLStep(
         name=f"Train-{target}",
-        automl=automl,
-        inputs=input_data
+        step_args=automl_args
     )
     
     automl_steps.append(step_automl)
@@ -87,7 +95,8 @@ for target in TARGET_COLS:
 # --- STEP 3: BUILD AND RUN PIPELINE ---
 pipeline = Pipeline(
     name="Dynamic-MultiTarget-AutoML",
-    steps=[step_process] + automl_steps, # Run Process first, then all AutoMLs run in parallel
+    # We flatten the list so it is [ProcessingStep, AutoMLStep1, AutoMLStep2, ...]
+    steps=[step_process] + automl_steps, 
     sagemaker_session=pipeline_session
 )
 
