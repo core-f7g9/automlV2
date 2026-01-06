@@ -1,0 +1,342 @@
+import boto3
+import sagemaker
+from sagemaker.workflow.pipeline import Pipeline
+from sagemaker.workflow.steps import ProcessingStep, TrainingStep
+from sagemaker.workflow.parameters import ParameterString, ParameterInteger
+from sagemaker.workflow.step_collections import RegisterModel
+from sagemaker.processing import ScriptProcessor
+from sagemaker.sklearn.processing import SKLearnProcessor
+from sagemaker.automl.automl import AutoML
+from sagemaker.inputs import TrainingInput
+from sagemaker.model_metrics import MetricsSource, ModelMetrics
+from sagemaker.workflow.properties import PropertyFile
+from sagemaker.workflow.condition_step import ConditionStep
+from sagemaker.workflow.conditions import ConditionGreaterThanOrEqualTo
+from sagemaker.workflow.functions import JsonGet
+import json
+from datetime import datetime
+
+# Configuration
+REGION = boto3.Session().region_name
+ROLE = sagemaker.get_execution_role()
+BUCKET = sagemaker.Session().default_bucket()
+PREFIX = "automl-multiclass"
+
+# User-defined parameters
+TARGET_COL = ["DepartmentCode"]
+INPUT_FEATURES = ["VendorName", "LineDescription", "ClubNumber"]
+
+# Pipeline parameters
+input_data_uri = ParameterString(
+    name="InputDataUri",
+    default_value=f"s3://{BUCKET}/{PREFIX}/input/data.csv"
+)
+
+model_approval_status = ParameterString(
+    name="ModelApprovalStatus",
+    default_value="PendingManualApproval"
+)
+
+model_package_group_name = ParameterString(
+    name="ModelPackageGroupName",
+    default_value="automl-multiclass-models"
+)
+
+max_candidates = ParameterInteger(
+    name="MaxCandidates",
+    default_value=10
+)
+
+max_runtime_per_job = ParameterInteger(
+    name="MaxRuntimePerJob",
+    default_value=3600
+)
+
+# Step 1: Data Validation and Preprocessing
+sklearn_processor = SKLearnProcessor(
+    framework_version="1.2-1",
+    role=ROLE,
+    instance_type="ml.m5.xlarge",
+    instance_count=1,
+    base_job_name="automl-preprocessing"
+)
+
+preprocessing_code = f"""
+import pandas as pd
+import json
+import os
+from sklearn.model_selection import train_test_split
+
+# Configuration
+TARGET_COL = {TARGET_COL}
+INPUT_FEATURES = {INPUT_FEATURES}
+
+# Read data
+input_path = "/opt/ml/processing/input/data.csv"
+df = pd.read_csv(input_path)
+
+print(f"Data shape: {{df.shape}}")
+print(f"Columns: {{df.columns.tolist()}}")
+
+# Validate columns
+missing_cols = set(TARGET_COL + INPUT_FEATURES) - set(df.columns)
+if missing_cols:
+    raise ValueError(f"Missing columns: {{missing_cols}}")
+
+# Select features and target
+features = INPUT_FEATURES + TARGET_COL
+df_processed = df[features].copy()
+
+# Remove rows with missing target
+df_processed = df_processed.dropna(subset=TARGET_COL)
+
+print(f"Processed data shape: {{df_processed.shape}}")
+print(f"Target distribution:\\n{{df_processed[TARGET_COL[0]].value_counts()}}")
+
+# Split train/validation (80/20)
+train_df, val_df = train_test_split(
+    df_processed, 
+    test_size=0.2, 
+    random_state=42,
+    stratify=df_processed[TARGET_COL[0]]
+)
+
+# Save datasets
+train_path = "/opt/ml/processing/output/train/train.csv"
+val_path = "/opt/ml/processing/output/validation/validation.csv"
+os.makedirs(os.path.dirname(train_path), exist_ok=True)
+os.makedirs(os.path.dirname(val_path), exist_ok=True)
+
+train_df.to_csv(train_path, index=False, header=True)
+val_df.to_csv(val_path, index=False, header=True)
+
+# Save metadata
+metadata = {{
+    "train_samples": len(train_df),
+    "val_samples": len(val_df),
+    "num_classes": df_processed[TARGET_COL[0]].nunique(),
+    "feature_count": len(INPUT_FEATURES),
+    "target_column": TARGET_COL[0]
+}}
+
+with open("/opt/ml/processing/output/metadata/metadata.json", "w") as f:
+    json.dump(metadata, f)
+
+print("Preprocessing completed successfully")
+"""
+
+# Write preprocessing script
+with open("preprocessing.py", "w") as f:
+    f.write(preprocessing_code)
+
+step_process = ProcessingStep(
+    name="PreprocessData",
+    processor=sklearn_processor,
+    inputs=[
+        sagemaker.processing.ProcessingInput(
+            source=input_data_uri,
+            destination="/opt/ml/processing/input"
+        )
+    ],
+    outputs=[
+        sagemaker.processing.ProcessingOutput(
+            output_name="train",
+            source="/opt/ml/processing/output/train"
+        ),
+        sagemaker.processing.ProcessingOutput(
+            output_name="validation",
+            source="/opt/ml/processing/output/validation"
+        ),
+        sagemaker.processing.ProcessingOutput(
+            output_name="metadata",
+            source="/opt/ml/processing/output/metadata"
+        )
+    ],
+    code="preprocessing.py"
+)
+
+# Step 2: AutoML Training
+timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+automl_job_name = f"automl-multiclass-{timestamp}"
+
+automl = AutoML(
+    role=ROLE,
+    target_attribute_name=TARGET_COL[0],
+    mode="ENSEMBLING",
+    problem_type="MulticlassClassification",
+    max_candidates=max_candidates,
+    max_runtime_per_training_job_in_seconds=max_runtime_per_job,
+    total_job_runtime_in_seconds=86400,  # 24 hours max
+    job_objective={
+        "MetricName": "Accuracy"
+    },
+    output_path=f"s3://{BUCKET}/{PREFIX}/automl-output",
+    base_job_name="automl-multiclass",
+    sagemaker_session=sagemaker.Session(),
+    tags=[
+        {"Key": "Project", "Value": "AutoML-MultiClass"},
+        {"Key": "Pipeline", "Value": "True"}
+    ]
+)
+
+# Training inputs
+train_input = TrainingInput(
+    s3_data=step_process.properties.ProcessingOutputConfig.Outputs["train"].S3Output.S3Uri,
+    content_type="text/csv;header=present"
+)
+
+validation_input = TrainingInput(
+    s3_data=step_process.properties.ProcessingOutputConfig.Outputs["validation"].S3Output.S3Uri,
+    content_type="text/csv;header=present"
+)
+
+step_train = TrainingStep(
+    name="AutoMLTraining",
+    estimator=automl,
+    inputs={
+        "training": train_input,
+        "validation": validation_input
+    }
+)
+
+# Step 3: Evaluate Model (Extract metrics)
+evaluation_processor = SKLearnProcessor(
+    framework_version="1.2-1",
+    role=ROLE,
+    instance_type="ml.m5.xlarge",
+    instance_count=1,
+    base_job_name="automl-evaluation"
+)
+
+evaluation_code = """
+import json
+import boto3
+import os
+
+# Get AutoML job name from environment
+automl_job_name = os.environ.get("AUTOML_JOB_NAME")
+
+# Initialize SageMaker client
+sm_client = boto3.client("sagemaker")
+
+# Describe AutoML job to get best candidate
+response = sm_client.describe_auto_ml_job_v2(AutoMLJobName=automl_job_name)
+best_candidate = response["BestCandidate"]
+
+# Extract metrics
+metrics = {}
+for metric in best_candidate["CandidateProperties"]["CandidateMetrics"]:
+    metrics[metric["MetricName"]] = metric["Value"]
+
+# Extract accuracy
+accuracy = metrics.get("Accuracy", 0.0)
+
+print(f"Best Candidate: {best_candidate['CandidateName']}")
+print(f"Accuracy: {accuracy}")
+print(f"All Metrics: {metrics}")
+
+# Save evaluation results
+evaluation_results = {
+    "metrics": {
+        "accuracy": {"value": accuracy}
+    },
+    "candidate_name": best_candidate["CandidateName"]
+}
+
+output_dir = "/opt/ml/processing/evaluation"
+os.makedirs(output_dir, exist_ok=True)
+
+with open(f"{output_dir}/evaluation.json", "w") as f:
+    json.dump(evaluation_results, f)
+
+print("Evaluation completed successfully")
+"""
+
+with open("evaluation.py", "w") as f:
+    f.write(evaluation_code)
+
+step_eval = ProcessingStep(
+    name="EvaluateModel",
+    processor=evaluation_processor,
+    outputs=[
+        sagemaker.processing.ProcessingOutput(
+            output_name="evaluation",
+            source="/opt/ml/processing/evaluation"
+        )
+    ],
+    code="evaluation.py",
+    job_arguments=["--automl-job-name", automl_job_name]
+)
+
+# Property file for evaluation metrics
+evaluation_report = PropertyFile(
+    name="EvaluationReport",
+    output_name="evaluation",
+    path="evaluation.json"
+)
+
+step_eval.add_property_files(evaluation_report)
+
+# Step 4: Register Model (Conditional on accuracy threshold)
+model_metrics = ModelMetrics(
+    model_statistics=MetricsSource(
+        s3_uri=f"{step_eval.properties.ProcessingOutputConfig.Outputs['evaluation'].S3Output.S3Uri}/evaluation.json",
+        content_type="application/json"
+    )
+)
+
+step_register = RegisterModel(
+    name="RegisterBestModel",
+    estimator=automl,
+    model_data=step_train.properties.ModelArtifacts.S3ModelArtifacts,
+    content_types=["text/csv"],
+    response_types=["text/csv"],
+    inference_instances=["ml.m5.xlarge", "ml.m5.2xlarge"],
+    transform_instances=["ml.m5.xlarge"],
+    model_package_group_name=model_package_group_name,
+    approval_status=model_approval_status,
+    model_metrics=model_metrics,
+    description=f"AutoML MultiClass Classification Model - Target: {TARGET_COL[0]}",
+)
+
+# Condition: Only register if accuracy >= 0.7
+cond_gte = ConditionGreaterThanOrEqualTo(
+    left=JsonGet(
+        step_name=step_eval.name,
+        property_file=evaluation_report,
+        json_path="metrics.accuracy.value"
+    ),
+    right=0.7
+)
+
+step_cond = ConditionStep(
+    name="CheckAccuracyThreshold",
+    conditions=[cond_gte],
+    if_steps=[step_register],
+    else_steps=[]
+)
+
+# Create Pipeline
+pipeline = Pipeline(
+    name="AutoMLMultiClassPipeline",
+    parameters=[
+        input_data_uri,
+        model_approval_status,
+        model_package_group_name,
+        max_candidates,
+        max_runtime_per_job
+    ],
+    steps=[step_process, step_train, step_eval, step_cond],
+    sagemaker_session=sagemaker.Session()
+)
+
+# Create/Update Pipeline
+pipeline.upsert(role_arn=ROLE)
+
+# Execute Pipeline
+execution = pipeline.start()
+print(f"Pipeline execution started: {execution.arn}")
+
+# Monitor execution
+execution.wait()
+print(f"Pipeline execution completed with status: {execution.describe()['PipelineExecutionStatus']}")
